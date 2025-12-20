@@ -60,19 +60,15 @@ class MPEWrapper:
     def reset(self, seed=None):
         """Reset environment"""
         if seed is not None:
-            # PettingZoo doesn't use seed() anymore
             pass
         
         obs_dict, info_dict = self.env.reset(seed=seed)
         self.step_count = 0
-        
-        # Convert to array format
+    
         obs = np.array([obs_dict[agent] for agent in self.agents])
-        
-        # Shared observation (concatenated local observations)
+    
         share_obs = np.tile(obs.flatten(), (self.n_agents, 1))
-        
-        # Available actions (all available by default)
+
         available_actions = None
         if isinstance(self.action_space[0], spaces.Discrete):
             available_actions = np.ones((self.n_agents, self.action_space[0].n))
@@ -90,41 +86,30 @@ class MPEWrapper:
             obs, share_obs, rewards, dones, infos, available_actions
         """
         self.step_count += 1
-        
-        # Convert to dict
         action_dict = {agent: actions[i] for i, agent in enumerate(self.agents)}
-        
-        # Step
         obs_dict, reward_dict, done_dict, trunc_dict, info_dict = \
             self.env.step(action_dict)
-        
-        # Convert to arrays
         obs = np.array([obs_dict[agent] for agent in self.agents])
         rewards = np.array([[reward_dict[agent]] for agent in self.agents])
         dones = np.array([done_dict[agent] or trunc_dict[agent] 
                          for agent in self.agents])
         infos = [info_dict[agent] for agent in self.agents]
-        
-        # Shared observation
         share_obs = np.tile(obs.flatten(), (self.n_agents, 1))
-        
-        # Available actions
+
         available_actions = None
         if isinstance(self.action_space[0], spaces.Discrete):
             available_actions = np.ones((self.n_agents, self.action_space[0].n))
         
-        # Episode done
+
         if self.step_count >= self.max_cycles:
             dones = np.ones(self.n_agents, dtype=bool)
         
         return obs, share_obs, rewards, dones, infos, available_actions
     
     def close(self):
-        """Close environment"""
         self.env.close()
     
     def render(self):
-        """Render environment (if supported)"""
         try:
             return self.env.render()
         except:
@@ -132,7 +117,6 @@ class MPEWrapper:
 
 
 def make_env(env_name='simple_spread', n_agents=3, seed=0):
-    """Factory function to create environment"""
     def _init():
         env = MPEWrapper(env_name=env_name, n_agents=n_agents)
         return env
@@ -140,7 +124,6 @@ def make_env(env_name='simple_spread', n_agents=3, seed=0):
 
 
 if __name__ == "__main__":
-    # Test the wrapper
     print("Testing MPE Wrapper...")
     print("=" * 60)
     
