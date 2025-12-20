@@ -1,0 +1,72 @@
+# MAPPO Configuration for Simple Spread Environment
+# Save as: configs/simple_spread_mappo.yaml
+
+# Basic settings
+seed: 42
+cuda: false  # Set true if you have GPU
+cuda_deterministic: true
+n_training_threads: 1
+n_rollout_threads: 8  # Number of parallel environments
+n_eval_rollout_threads: 1
+
+# Environment settings
+env_name: "MPE"
+scenario_name: "simple_spread"
+num_agents: 3
+episode_length: 25
+
+# Network architecture
+use_centralized_V: true  # Use global state for critic (MAPPO)
+use_obs_instead_of_state: false
+
+# Hidden layer sizes
+hidden_size: 64
+layer_N: 1  # Number of hidden layers
+use_ReLU: true
+use_feature_normalization: true
+use_orthogonal: true
+gain: 0.01
+
+# Recurrent policy (set false for feed-forward)
+use_recurrent_policy: false
+recurrent_N: 1
+data_chunk_length: 10
+
+# Optimizer settings
+lr: 0.0007  # Learning rate
+critic_lr: 0.0007
+opti_eps: 1.0e-05
+weight_decay: 0
+
+# PPO parameters
+ppo_epoch: 15
+use_clipped_value_loss: true
+clip_param: 0.2
+num_mini_batch: 1
+entropy_coef: 0.01
+value_loss_coef: 1
+use_max_grad_norm: true
+max_grad_norm: 10.0
+use_gae: true
+gamma: 0.99  # Discount factor
+gae_lambda: 0.95
+use_proper_time_limits: false
+use_huber_loss: true
+use_value_active_masks: true
+use_policy_active_masks: true
+huber_delta: 10.0
+
+# Training settings
+num_env_steps: 2000000  # Total environment steps
+n_rollout_threads: 8
+episode_length: 25
+use_linear_lr_decay: false
+save_interval: 25  # Save model every N updates
+log_interval: 5  # Log every N updates
+use_eval: true
+eval_interval: 25
+eval_episodes: 32
+
+# Logging
+model_dir: null
+log_dir: "./results"
