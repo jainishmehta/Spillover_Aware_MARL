@@ -13,11 +13,18 @@ class Actor(nn.Module):
         input_size = state_size
         
         for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(input_size, hidden_size))
+            linear = nn.Linear(input_size, hidden_size)
+            # Use smaller initialization to prevent largeparameter growth
+            nn.init.orthogonal_(linear.weight, gain=np.sqrt(0.5))
+            nn.init.constant_(linear.bias, 0.0)
+            layers.append(linear)
             layers.append(nn.ReLU())
             input_size = hidden_size
-        
-        layers.append(nn.Linear(input_size, action_size))
+
+        output_layer = nn.Linear(input_size, action_size)
+        nn.init.orthogonal_(output_layer.weight, gain=0.01)
+        nn.init.constant_(output_layer.bias, 0.0)
+        layers.append(output_layer)
         layers.append(nn.Tanh())
         
         self.network = nn.Sequential(*layers)
@@ -34,11 +41,17 @@ class Critic(nn.Module):
         input_size = total_state_size + total_action_size
         
         for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(input_size, hidden_size))
+            linear = nn.Linear(input_size, hidden_size)
+            nn.init.orthogonal_(linear.weight, gain=np.sqrt(0.5))
+            nn.init.constant_(linear.bias, 0.0)
+            layers.append(linear)
             layers.append(nn.ReLU())
             input_size = hidden_size
-        
-        layers.append(nn.Linear(input_size, 1))
+
+        output_layer = nn.Linear(input_size, 1)
+        nn.init.orthogonal_(output_layer.weight, gain=0.5)
+        nn.init.constant_(output_layer.bias, 0.0)
+        layers.append(output_layer)
         
         self.network = nn.Sequential(*layers)
     
@@ -50,13 +63,14 @@ class Critic(nn.Module):
 class MADDPG:
     def __init__(self, state_sizes, action_sizes, hidden_sizes=(64, 64),
                  actor_lr=1e-3, critic_lr=2e-3, gamma=0.95, tau=0.01,
-                 action_low=None, action_high=None):
-        
+                 action_low=None, action_high=None, reward_scale=1.0, weight_decay=1e-4):
         self.num_agents = len(state_sizes)
         self.state_sizes = state_sizes
         self.action_sizes = action_sizes
         self.gamma = gamma
         self.tau = tau
+        self.reward_scale = reward_scale
+        self.weight_decay = weight_decay
 
         if action_low is None:
             self.action_low = [np.array([-1.0] * size) for size in action_sizes]
@@ -87,8 +101,8 @@ class MADDPG:
             target_critic = Critic(total_state_size, total_action_size, hidden_sizes)
             target_critic.load_state_dict(critic.state_dict())
             
-            actor_optimizer = optim.Adam(actor.parameters(), lr=actor_lr)
-            critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr)
+            actor_optimizer = optim.Adam(actor.parameters(), lr=actor_lr, weight_decay=self.weight_decay)
+            critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr, weight_decay=self.weight_decay)
             
             self.actors.append(actor)
             self.critics.append(critic)
@@ -142,7 +156,9 @@ class MADDPG:
             next_actions_flat = torch.cat(next_actions, dim=1)
 
             q_next = self.target_critics[agent_idx](next_states_flat, next_actions_flat)
-            q_target = rewards[:, agent_idx:agent_idx+1] + self.gamma * (1 - dones[:, agent_idx:agent_idx+1]) * q_next
+            scaled_rewards = rewards[:, agent_idx:agent_idx+1] * self.reward_scale
+            q_target = scaled_rewards + self.gamma * (1 - dones[:, agent_idx:agent_idx+1]) * q_next
+            q_target = torch.clamp(q_target, -100.0, 100.0)
         
 
         q_current = self.critics[agent_idx](states_flat, actions_flat)
@@ -204,3 +220,36 @@ class MADDPG:
             self.target_critics[i].load_state_dict(checkpoint['target_critics'][i])
             self.actor_optimizers[i].load_state_dict(checkpoint['actor_optimizers'][i])
             self.critic_optimizers[i].load_state_dict(checkpoint['critic_optimizers'][i])
+    
+    def get_value_estimates(self, states):
+        """
+        Args:
+            states: List of state arrays, one per agent (each can be 1D or 2D)
+            
+        Returns:
+            List of Q-value estimates, one per agent
+        """
+        with torch.no_grad():
+            states_tensors = []
+            for state in states:
+                state_tensor = torch.FloatTensor(state)
+                if len(state_tensor.shape) == 1:
+                    state_tensor = state_tensor.unsqueeze(0)
+                states_tensors.append(state_tensor)
+    
+            batch_size = states_tensors[0].shape[0]
+            states_tensor = torch.stack(states_tensors, dim=1)
+            states_flat = states_tensor.view(batch_size, -1)
+
+            actions = []
+            for i in range(self.num_agents):
+                action = self.actors[i](states_tensor[:, i])
+                actions.append(action)
+            actions_flat = torch.cat(actions, dim=1)
+
+            q_values = []
+            for agent_idx in range(self.num_agents):
+                q_value = self.critics[agent_idx](states_flat, actions_flat)
+                q_values.append(q_value.cpu().numpy().flatten())
+            
+            return q_values

@@ -10,11 +10,11 @@ from replay_buffer import ReplayBuffer
 from env_utils import get_env_info, create_env
 from logger import Logger
 from evaluator import evaluate
+from trajectory_collector import TrajectoryCollector
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MADDPG")
-    
     parser.add_argument("--env-name", type=str, default="simple_spread_v3")
     parser.add_argument("--algo", type=str, default="MADDPG")
     parser.add_argument("--total-timesteps", type=int, default=int(1e6))
@@ -31,9 +31,16 @@ def parse_args():
     parser.add_argument("--noise-scale", type=float, default=0.3)
     parser.add_argument("--min-noise", type=float, default=0.05)
     parser.add_argument("--eval-interval", type=int, default=5000)
+    parser.add_argument("--collect-trajectory", action="store_true", 
+                       help="Enable trajectory data collection for spillover analysis")
+    parser.add_argument("--trajectory-interval", type=int, default=1000,
+                       help="Interval (in steps) for collecting trajectory data")
+    parser.add_argument("--reward-scale", type=float, default=0.1,
+                       help="Scale factor for rewards (helps stabilize Q-values)")
+    parser.add_argument("--weight-decay", type=float, default=1e-4,
+                       help="L2 regularization (weight decay) to prevent large parameters")
     
     return parser.parse_args()
-
 
 def train(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -59,9 +66,10 @@ def train(args):
         gamma=args.gamma,
         tau=args.tau,
         action_low=action_low,
-        action_high=action_high
+        action_high=action_high,
+        reward_scale=args.reward_scale,
+        weight_decay=args.weight_decay
     )
-    
     buffer = ReplayBuffer(
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
@@ -69,11 +77,19 @@ def train(args):
         state_sizes=state_sizes,
         action_sizes=action_sizes
     )
-
     save_dir = os.path.join("runs", experiment_name)
     os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, "model.pt")
     best_model_path = os.path.join(save_dir, "best_model.pt")
+
+    trajectory_collector = None
+    if args.collect_trajectory:
+        trajectory_collector = TrajectoryCollector(
+            num_agents=num_agents,
+            save_dir=save_dir,
+            collect_interval=args.trajectory_interval
+        )
+        print(f"Trajectory collection enabled (interval: {args.trajectory_interval} steps)")
     
     noise_scale = args.noise_scale
     best_score = -float('inf')
@@ -95,8 +111,7 @@ def train(args):
         next_observations, rewards, terminations, truncations, _ = env.step(actions_dict)
         dones = [terminations[agent] or truncations[agent] for agent in agents]
         done = any(dones)
-        
-        # Store transition
+
         rewards_array = np.array([rewards[agent] for agent in agents], dtype=np.float32)
         next_states = [np.array(next_observations[agent], dtype=np.float32) for agent in agents]
         dones_array = np.array([terminations[agent] for agent in agents], dtype=np.uint8)
@@ -104,6 +119,16 @@ def train(args):
         buffer.add(states, actions, rewards_array, next_states, dones_array)
         observations = next_observations
         episode_rewards += rewards_array
+        
+        # Collect trajectory data for spillover analysis
+        if trajectory_collector is not None:
+            trajectory_collector.collect(
+                timestep=global_step,
+                maddpg=maddpg,
+                states=states,
+                episode_rewards=episode_rewards if done or (global_step % args.max_steps == 0) else None
+            )
+        
         if global_step > args.warmup_steps and global_step % args.update_every == 0:
             for agent_idx in range(num_agents):
                 batch = buffer.sample()
@@ -132,6 +157,14 @@ def train(args):
                 maddpg.save(best_model_path)
                 print(f"New best score: {score:.2f} (success rate: {success_rate:.1f}%)")
     maddpg.save(model_path)
+
+    if trajectory_collector is not None:
+        trajectory_collector.save("trajectory_data.pkl")
+        summary = trajectory_collector.get_trajectory_summary()
+        print(f"\nTrajectory Collection Summary:")
+        print(f"  - Total snapshots: {summary['num_snapshots']}")
+        print(f"  - Timestep range: {summary['timestep_range']}")
+    
     env.close()
     env_eval.close()
     logger.close()
