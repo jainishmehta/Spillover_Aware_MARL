@@ -119,8 +119,7 @@ def train(args):
         buffer.add(states, actions, rewards_array, next_states, dones_array)
         observations = next_observations
         episode_rewards += rewards_array
-        
-        # Collect trajectory data for spillover analysis
+
         if trajectory_collector is not None:
             trajectory_collector.collect(
                 timestep=global_step,

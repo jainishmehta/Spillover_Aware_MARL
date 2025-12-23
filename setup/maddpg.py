@@ -8,13 +8,13 @@ import numpy as np
 class Actor(nn.Module):
     def __init__(self, state_size, action_size, hidden_sizes=(64, 64)):
         super(Actor, self).__init__()
-        
+
         layers = []
         input_size = state_size
-        
+
         for hidden_size in hidden_sizes:
             linear = nn.Linear(input_size, hidden_size)
-            # Use smaller initialization to prevent largeparameter growth
+            # Use smaller initialization to prevent large parameter growth
             nn.init.orthogonal_(linear.weight, gain=np.sqrt(0.5))
             nn.init.constant_(linear.bias, 0.0)
             layers.append(linear)
@@ -76,7 +76,7 @@ class MADDPG:
             self.action_low = [np.array([-1.0] * size) for size in action_sizes]
         else:
             self.action_low = action_low
-            
+
         if action_high is None:
             self.action_high = [np.array([1.0] * size) for size in action_sizes]
         else:
@@ -159,10 +159,8 @@ class MADDPG:
             scaled_rewards = rewards[:, agent_idx:agent_idx+1] * self.reward_scale
             q_target = scaled_rewards + self.gamma * (1 - dones[:, agent_idx:agent_idx+1]) * q_next
             q_target = torch.clamp(q_target, -100.0, 100.0)
-        
 
         q_current = self.critics[agent_idx](states_flat, actions_flat)
-
         critic_loss = F.mse_loss(q_current, q_target)
 
         self.critic_optimizers[agent_idx].zero_grad()
@@ -251,5 +249,4 @@ class MADDPG:
             for agent_idx in range(self.num_agents):
                 q_value = self.critics[agent_idx](states_flat, actions_flat)
                 q_values.append(q_value.cpu().numpy().flatten())
-            
             return q_values

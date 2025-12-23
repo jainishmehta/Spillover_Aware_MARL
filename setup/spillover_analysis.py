@@ -9,7 +9,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def load_trajectory_data(filepath):
-    """Load trajectory data from pickle file."""
     with open(filepath, 'rb') as f:
         data = pickle.load(f)
     return data
@@ -45,7 +44,7 @@ def prepare_trajectories(data, metric='agent_values', max_lag=5):
                 trajectories.append(param_norms)
             else:
                 raise ValueError(f"Missing policy_params for agent {agent_idx}")
-        trajectories = np.array(trajectories).T  # Shape: (T, num_agents)
+        trajectories = np.array(trajectories).T 
         
     elif metric == 'episode_rewards':
         trajectories = []
@@ -157,7 +156,7 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
             
             if rejected[corrected_idx]:
                 A[j, i] = 1
-                print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f} ✓")
+                print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f}")
             
             corrected_idx += 1
     

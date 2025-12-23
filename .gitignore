@@ -1,6 +1,3 @@
 myenv/
-myenv/
-create_ground_truth.py
-ground_truth_chain.npy
-granger_causality.py
+testing/
 runs/

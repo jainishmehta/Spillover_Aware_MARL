@@ -31,8 +31,7 @@ class ReplayBuffer:
     
     def sample(self):
         indices = np.random.choice(self.size, self.batch_size, replace=False)
-        
-        # Extract samples
+
         states = self.states[indices]
         actions = self.actions[indices]
         rewards = self.rewards[indices]

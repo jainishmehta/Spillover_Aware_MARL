@@ -2,18 +2,6 @@ import numpy as np
 
 
 def check_success_simple_spread(env):
-    """
-    Check if the current state is a success for simple_spread_v3
-    
-    Success criteria: Each landmark is covered by at least one agent
-    (agent is within distance threshold of landmark)
-    
-    Args:
-        env: PettingZoo environment
-        
-    Returns:
-        bool: True if success, False otherwise
-    """
     try:
         if hasattr(env, 'unwrapped'):
             base_env = env.unwrapped
@@ -37,8 +25,6 @@ def check_success_simple_spread(env):
 
 def evaluate(env, maddpg, agents, logger, global_step, num_episodes=10):
     """
-    Evaluate the MADDPG agents without exploration noise
-    
     Args:
         env: Environment to evaluate on
         maddpg: MADDPG agent
