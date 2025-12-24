@@ -63,7 +63,7 @@ def test_stationarity(trajectories, agent_names=None):
             print(f"\n{agent_names[i]} - KPSS Test:")
             print(f"  Statistic: {kpss_stat:.4f}")
             print(f"  p-value: {kpss_pvalue:.4f}")
-            print(f"  Stationary: {'Yes ✓' if kpss_pvalue > 0.05 else 'No ✗'}")
+            print(f"  Stationary: {'Yes' if kpss_pvalue > 0.05 else 'No'}")
         except Exception as e:
             print(f"  KPSS test failed: {e}")
             results['kpss'][i] = {'stationary': False}
@@ -169,8 +169,17 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
         print(f"  - Residual diagnostics:")
         for i in range(num_agents):
             residuals_i = fitted_model.resid[:, i]
-            ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
-            lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
+            try:
+                residuals_i = fitted_model.resid[:, i]
+                # Ensure residuals_i is 1D
+                if residuals_i.ndim > 1:
+                    residuals_i = residuals_i.flatten()
+                
+                ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
+                lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
+            except Exception as e:
+                print(f"    Agent {i}: Ljung-Box test failed: {e}")
+                continue
             if lb_pvalue < 0.05:
                 print(f"    Agent {i}: p={lb_pvalue:.4f} (serial correlation detected)")
             else:
@@ -215,7 +224,7 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
             
             if rejected[idx]:
                 A[j, i] = 1
-                print(f"  ✓ Agent {i} -> Agent {j}: p={p_values[idx]:.4f}, "
+                print(f" Agent {i} -> Agent {j}: p={p_values[idx]:.4f}, "
                       f"corrected_p={pvals_corrected[idx]:.4f}")
             else:
                 if p_values[idx] < 0.1:
@@ -278,7 +287,6 @@ def validate_influence_matrix(A_hat, A_true):
     print(f"  TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}")
     
     return metrics
-
 
 def test_time_windows(trajectories, max_lag=5, alpha=0.05, window_sizes=None):
     """
