@@ -55,7 +55,10 @@ class TrajectoryCollector:
         if states is not None:
             q_values = maddpg.get_value_estimates(states)
             for agent_idx in range(self.num_agents):
-                self.agent_values[agent_idx].append(q_values[agent_idx][0] if len(q_values[agent_idx]) > 0 else 0.0)
+                if len(q_values[agent_idx]) > 0:
+                    self.agent_values[agent_idx].append(q_values[agent_idx][0])
+                else:
+                    self.agent_values[agent_idx].append(0.0)
     
     def save(self, filename="trajectory_data.pkl"):
         """

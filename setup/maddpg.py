@@ -84,7 +84,7 @@ class MADDPG:
 
         total_state_size = sum(state_sizes)
         total_action_size = sum(action_sizes)
-        
+
         self.actors = []
         self.critics = []
         self.target_actors = []
@@ -96,7 +96,7 @@ class MADDPG:
             actor = Actor(state_sizes[i], action_sizes[i], hidden_sizes)
             target_actor = Actor(state_sizes[i], action_sizes[i], hidden_sizes)
             target_actor.load_state_dict(actor.state_dict())
-            
+
             critic = Critic(total_state_size, total_action_size, hidden_sizes)
             target_critic = Critic(total_state_size, total_action_size, hidden_sizes)
             target_critic.load_state_dict(critic.state_dict())
@@ -143,7 +143,7 @@ class MADDPG:
         rewards = torch.FloatTensor(rewards)
         next_states = torch.FloatTensor(next_states)
         dones = torch.FloatTensor(dones)
-        
+
         states_flat = states.view(batch_size, -1)
         actions_flat = actions.view(batch_size, -1)
         next_states_flat = next_states.view(batch_size, -1)
@@ -167,7 +167,6 @@ class MADDPG:
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critics[agent_idx].parameters(), 0.5)
         self.critic_optimizers[agent_idx].step()
-
         current_actions = []
         for i in range(self.num_agents):
             if i == agent_idx:

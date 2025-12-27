@@ -101,6 +101,13 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
         lag_order = model.select_order(maxlags=max_lag)
         optimal_lag = lag_order.selected_orders.get('aic', max_lag)
         optimal_lag = min(optimal_lag, max_lag)
+        
+        # Granger causality requires at least lag 1
+        if optimal_lag == 0:
+            print(f"Warning: Optimal lag is 0, but Granger causality requires lag >= 1")
+            print(f"Using minimum lag of 1 for Granger causality tests")
+            optimal_lag = 1
+        
         print(f"Optimal lag selected: {optimal_lag}")
         
         fitted_model = model.fit(optimal_lag)
@@ -109,8 +116,20 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
         print(f"  - AIC: {fitted_model.aic:.4f}")
         print(f"  - BIC: {fitted_model.bic:.4f}")
         
-        ljung_box = acorr_ljungbox(fitted_model.resid, lags=10, return_df=True)
-        print(f"  - Ljung-Box p-value: {ljung_box['lb_pvalue'].iloc[-1]:.4f}")
+        try:
+            print(f"  - Residual diagnostics:")
+            for i in range(num_agents):
+                residuals_i = fitted_model.resid[:, i]
+                if residuals_i.ndim > 1:
+                    residuals_i = residuals_i.flatten()
+                ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
+                lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
+                if lb_pvalue < 0.05:
+                    print(f"    Agent {i}: p={lb_pvalue:.4f} (serial correlation detected)")
+                else:
+                    print(f"    Agent {i}: p={lb_pvalue:.4f} ✓ (no serial correlation)")
+        except Exception as e:
+            print(f"  - Residual diagnostics failed: {e}")
         
     except Exception as e:
         print(f"Warning: VAR model fitting failed: {e}")
@@ -144,8 +163,20 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
                 p_values[j, i] = 1.0
                 test_statistics[j, i] = 0.0
 
+    # Handle case where all tests failed (no p-values)
+    if len(all_p_values) == 0:
+        print(f"\nWarning: No valid Granger causality tests (all tests failed)")
+        print(f"Influence matrix will be all zeros")
+        return A, p_values, test_statistics
+    
     print(f"\nApplying FDR correction ({method})...")
     all_p_values = np.array(all_p_values)
+    
+    # Check if we have any valid p-values
+    if len(all_p_values) == 0 or np.all(np.isnan(all_p_values)):
+        print(f"Warning: No valid p-values for FDR correction")
+        return A, p_values, test_statistics
+    
     rejected, pvals_corrected, _, _ = multipletests(
         all_p_values, alpha=alpha, method=method
     )
@@ -250,15 +281,33 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
     results['global_k_hops'] = global_k_hops
 
     if time_windows is None:
-        num_windows = 3
+        # Adaptive number of windows based on data length
+        # Ensure each window has enough data for reliable analysis
+        # Use larger minimum for better statistical power (150-200 points recommended)
+        min_window_size = max((5 * num_agents * 2) + 10, 150)  # At least 150 points for reliability
         if len(timesteps) > 0:
-            time_range = timesteps[-1] - timesteps[0]
-            window_size = time_range / num_windows
+            total_time = timesteps[-1] - timesteps[0]
+            # Calculate max windows that still meet minimum size
+            max_windows = max(1, int((T - min_window_size) / min_window_size))
+            num_windows = min(3, max_windows)  # Use at most 3 windows
+            if num_windows == 0:
+                # If we can't even fit 1 window, use 1 window with all data
+                num_windows = 1
+            window_size = total_time / num_windows
             time_windows = [timesteps[0] + i * window_size for i in range(num_windows + 1)]
         else:
             # Use data indices if no timesteps
+            max_windows = max(1, int((T - min_window_size) / min_window_size))
+            num_windows = min(3, max_windows)
+            if num_windows == 0:
+                num_windows = 1
             window_size = T / num_windows
             time_windows = [int(i * window_size) for i in range(num_windows + 1)]
+        
+        print(f"Auto-generated {num_windows} time windows (minimum {min_window_size} points per window)")
+        if T < min_window_size * num_windows:
+            print(f"Warning: Total data ({T} points) may be insufficient for {num_windows} windows")
+            print(f"Consider collecting more trajectory data for reliable temporal analysis")
     
     print(f"\n{'='*60}")
     print("Temporal Window Analysis")
@@ -275,17 +324,37 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             mask = np.arange(T) >= int(window_start)
             mask = mask & (np.arange(T) < int(window_end))
         window_data = trajectories[mask]
-        if len(window_data) < 50:
-            print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}): Insufficient data ({len(window_data)} points)")
+        
+        # Minimum data requirements for reliable VAR analysis
+        # Need at least: (max_lag * num_agents * 2) + 10 observations
+        min_required = (5 * num_agents * 2) + 10
+        if len(window_data) < min_required:
+            print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}):")
+            print(f"  Insufficient data: {len(window_data)} points (minimum: {min_required})")
+            print(f"  Skipping this window")
             continue
         
         print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}):")
         print(f"  Data points: {len(window_data)}")
 
         try:
+            # Adaptive lag: ensure we have enough data for the lag
+            # Rule: need at least (lag * num_agents * 2) observations
+            adaptive_max_lag = 5
+            for test_lag in range(5, 0, -1):
+                required_obs = (test_lag * num_agents * 2) + 10
+                if len(window_data) >= required_obs:
+                    adaptive_max_lag = test_lag
+                    break
+            
+            # Ensure minimum lag of 1 for Granger causality
+            adaptive_max_lag = max(1, adaptive_max_lag)
+            
+            print(f"  Using max_lag: {adaptive_max_lag} (based on {len(window_data)} observations)")
+            
             A_window, _, _ = estimate_influence_granger(
                 window_data, 
-                max_lag=min(5, len(window_data) // 20),  # Adaptive lag
+                max_lag=adaptive_max_lag,
                 alpha=0.05
             )
             
@@ -306,18 +375,32 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
         
         except Exception as e:
             print(f"  Error analyzing window: {e}")
+            import traceback
+            print(f"  Traceback: {traceback.format_exc()}")
+            # Store failed window with zero matrix
+            results['temporal_windows'][window_idx] = {
+                'time_range': (window_start, window_end),
+                'influence_matrix': np.zeros((num_agents, num_agents), dtype=int),
+                'num_data_points': len(window_data),
+                'error': str(e)
+            }
             continue
 
     print(f"\n{'='*60}")
     print("Rolling Window Analysis")
     print(f"{'='*60}")
     
-    window_size = min(100, T // 5)
-    step_size = window_size // 2  # 50% overlap
+    # Adaptive window size based on data length
+    # Ensure minimum window size for reliable analysis
+    min_window_size = (3 * num_agents * 2) + 10  # Minimum for lag=3
+    window_size = max(min_window_size, min(100, T // 5))
+    step_size = max(1, window_size // 2)  # 50% overlap, minimum step of 1
+    
+    print(f"Rolling window size: {window_size}, step size: {step_size}")
     
     rolling_results = []
     
-    for start_idx in range(0, T - window_size, step_size):
+    for start_idx in range(0, T - window_size + 1, step_size):
         end_idx = start_idx + window_size
         window_data = trajectories[start_idx:end_idx]
         
@@ -326,10 +409,24 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
         else:
             window_times = (start_idx, end_idx-1)
         
+        # Check minimum data requirements
+        min_required = (3 * num_agents * 2) + 10
+        if len(window_data) < min_required:
+            continue
+        
         try:
+            # Adaptive lag for rolling windows
+            adaptive_max_lag = 3
+            for test_lag in range(3, 0, -1):
+                required_obs = (test_lag * num_agents * 2) + 10
+                if len(window_data) >= required_obs:
+                    adaptive_max_lag = test_lag
+                    break
+            adaptive_max_lag = max(1, adaptive_max_lag)
+            
             A_rolling, _, _ = estimate_influence_granger(
                 window_data,
-                max_lag=min(3, len(window_data) // 15),
+                max_lag=adaptive_max_lag,
                 alpha=0.05
             )
             
@@ -338,10 +435,12 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
                 'time_range': window_times,
                 'data_range': (start_idx, end_idx),
                 'influence_matrix': A_rolling,
-                'direct_links': int(direct_links)
+                'direct_links': int(direct_links),
+                'max_lag_used': adaptive_max_lag
             })
         
         except Exception as e:
+            # Silently skip failed rolling windows (too many to print)
             continue
     
     results['rolling_analysis'] = {

@@ -74,7 +74,7 @@ def train(args):
         buffer_size=args.buffer_size,
         batch_size=args.batch_size,
         num_agents=num_agents,
-        state_sizes=state_sizes,
+        state_sizes= state_sizes,
         action_sizes=action_sizes
     )
     save_dir = os.path.join("runs", experiment_name)
@@ -115,7 +115,7 @@ def train(args):
         rewards_array = np.array([rewards[agent] for agent in agents], dtype=np.float32)
         next_states = [np.array(next_observations[agent], dtype=np.float32) for agent in agents]
         dones_array = np.array([terminations[agent] for agent in agents], dtype=np.uint8)
-        
+
         buffer.add(states, actions, rewards_array, next_states, dones_array)
         observations = next_observations
         episode_rewards += rewards_array
@@ -130,6 +130,7 @@ def train(args):
         
         if global_step > args.warmup_steps and global_step % args.update_every == 0:
             for agent_idx in range(num_agents):
+                # Independent: each agent samples from its own buffer
                 batch = buffer.sample()
                 critic_loss, actor_loss = maddpg.learn(batch, agent_idx)
                 

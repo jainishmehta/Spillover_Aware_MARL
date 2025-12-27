@@ -1,3 +1,11 @@
 myenv/
 testing/
 runs/
+baseline_A_hat.pkl
+baseline_A_hat_A_hat.npy
+ground_truth_baseline.npy
+results.pkl
+validation_results.pkl
+validation_results_A_hat.npy
+validation_test.pkl
+validation_test_A_hat.npy

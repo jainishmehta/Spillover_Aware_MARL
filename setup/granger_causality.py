@@ -12,7 +12,6 @@ def test_stationarity(trajectories, agent_names=None):
     Args:
         trajectories: Array of shape (T, num_agents)
         agent_names: Optional list of agent names for display
-    
     Returns:
         results: Dictionary with stationarity test results
     """
@@ -171,7 +170,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
             residuals_i = fitted_model.resid[:, i]
             try:
                 residuals_i = fitted_model.resid[:, i]
-                # Ensure residuals_i is 1D
                 if residuals_i.ndim > 1:
                     residuals_i = residuals_i.flatten()
                 
@@ -221,7 +219,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
         for i in range(num_agents):
             if i == j:
                 continue
-            
             if rejected[idx]:
                 A[j, i] = 1
                 print(f" Agent {i} -> Agent {j}: p={p_values[idx]:.4f}, "
@@ -230,7 +227,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
                 if p_values[idx] < 0.1:
                     print(f"  - Agent {i} -> Agent {j}: p={p_values[idx]:.4f}, "
                           f"corrected_p={pvals_corrected[idx]:.4f} (not significant)")
-            
             idx += 1
     
     print(f"\nInfluence Matrix A (A[j,i] = 1 if i Granger-causes j):")
@@ -417,12 +413,12 @@ if __name__ == "__main__":
 
     A_true = None
     metrics = None
-    
+
     if args.ground_truth:
         print(f"\n{'='*60}")
         print("Loading Ground Truth")
         print(f"{'='*60}")
-        
+
         try:
             if args.ground_truth.endswith('.npy'):
                 A_true = np.load(args.ground_truth)
