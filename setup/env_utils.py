@@ -1,23 +1,45 @@
 import numpy as np
 from pettingzoo.mpe import simple_spread_v3, simple_tag_v3, simple_adversary_v3
+from simple_spread_relay import make_relay_race_env
 
 
 ENV_MAP = {
     'simple_spread_v3': simple_spread_v3,
+    'simple_spread_relay': 'relay_race',  # Special marker for relay race variant
     'simple_tag_v3': simple_tag_v3,
     'simple_adversary_v3': simple_adversary_v3,
 }
 
 
-def create_env(env_name, max_steps=25):
+def create_env(env_name, max_steps=25, tag_distance=0.1):
+    """
+    Create an environment.
+    
+    Args:
+        env_name: Name of the environment
+        max_steps: Maximum number of steps per episode
+        tag_distance: Distance threshold for relay race variant (only used for simple_spread_relay)
+    
+    Returns:
+        Environment instance
+    """
     if env_name not in ENV_MAP:
         raise ValueError(f"Unknown environment: {env_name}")
     
-    env = ENV_MAP[env_name].parallel_env(
-        max_cycles=max_steps,
-        continuous_actions=True,
-        render_mode=None
-    )
+    # Special handling for relay race variant
+    if env_name == 'simple_spread_relay':
+        env = make_relay_race_env(
+            max_cycles=max_steps,
+            continuous_actions=True,
+            tag_distance=tag_distance,
+            render_mode=None
+        )
+    else:
+        env = ENV_MAP[env_name].parallel_env(
+            max_cycles=max_steps,
+            continuous_actions=True,
+            render_mode=None
+        )
     
     return env
 

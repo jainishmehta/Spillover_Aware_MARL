@@ -130,7 +130,6 @@ def train(args):
         
         if global_step > args.warmup_steps and global_step % args.update_every == 0:
             for agent_idx in range(num_agents):
-                # Independent: each agent samples from its own buffer
                 batch = buffer.sample()
                 critic_loss, actor_loss = maddpg.learn(batch, agent_idx)
                 

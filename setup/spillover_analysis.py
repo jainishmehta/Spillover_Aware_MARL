@@ -3,6 +3,7 @@ import pickle
 from statsmodels.tsa.api import VAR
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import durbin_watson
+from statsmodels.tsa.stattools import adfuller, kpss
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
 import warnings
@@ -69,7 +70,82 @@ def prepare_trajectories(data, metric='agent_values', max_lag=5):
     return trajectories, timesteps
 
 
-def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_bh'):
+def test_stationarity(trajectories, agent_names=None):
+    T, num_agents = trajectories.shape
+    
+    if agent_names is None:
+        agent_names = [f"Agent {i}" for i in range(num_agents)]
+    
+    print(f"\n{'='*60}")
+    print("Stationarity Tests")
+    print(f"{'='*60}")
+    
+    results = {
+        'adf': {},
+        'kpss': {},
+        'is_stationary': {}
+    }
+    
+    for i in range(num_agents):
+        series = trajectories[:, i]
+        
+        # ADF Test (null: non-stationary)
+        try:
+            adf_result = adfuller(series, autolag='AIC')
+            adf_stat, adf_pvalue = adf_result[0], adf_result[1]
+            results['adf'][i] = {
+                'statistic': adf_stat,
+                'pvalue': adf_pvalue,
+                'stationary': adf_pvalue < 0.05
+            }
+            print(f"\n{agent_names[i]} - ADF Test:")
+            print(f"  Statistic: {adf_stat:.4f}")
+            print(f"  p-value: {adf_pvalue:.4f}")
+            print(f"  Stationary: {'Yes ✓' if adf_pvalue < 0.05 else 'No ✗'}")
+        except Exception as e:
+            print(f"  ADF test failed: {e}")
+            results['adf'][i] = {'stationary': False}
+        
+        # KPSS Test (null: stationary)
+        try:
+            kpss_result = kpss(series, regression='c', nlags='auto')
+            kpss_stat, kpss_pvalue = kpss_result[0], kpss_result[1]
+            results['kpss'][i] = {
+                'statistic': kpss_stat,
+                'pvalue': kpss_pvalue,
+                'stationary': kpss_pvalue > 0.05
+            }
+            print(f"\n{agent_names[i]} - KPSS Test:")
+            print(f"  Statistic: {kpss_stat:.4f}")
+            print(f"  p-value: {kpss_pvalue:.4f}")
+            print(f"  Stationary: {'Yes' if kpss_pvalue > 0.05 else 'No'}")
+        except Exception as e:
+            print(f"  KPSS test failed: {e}")
+            results['kpss'][i] = {'stationary': False}
+        
+        adf_stationary = results['adf'][i].get('stationary', False)
+        kpss_stationary = results['kpss'][i].get('stationary', False)
+        results['is_stationary'][i] = adf_stationary
+    
+    print(f"\n{'='*60}")
+    return results
+
+
+def make_stationary(trajectories, method='diff'):
+    if method == 'diff':
+        stationary = np.diff(trajectories, axis=0)
+        print(f"Applied first differencing: {trajectories.shape} -> {stationary.shape}")
+    elif method == 'diff2':
+        stationary = np.diff(np.diff(trajectories, axis=0), axis=0)
+        print(f"Applied second differencing: {trajectories.shape} -> {stationary.shape}")
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    return stationary, trajectories
+
+
+def estimate_influence_granger(trajectories, max_lag=5, alpha=0.1, method='fdr_bh', 
+                                check_stationarity=True, make_stationary_if_needed=True, quiet=False):
     """
     Args:
         trajectories: Array of shape (T, num_agents) with time series data
@@ -82,63 +158,102 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
         p_values: Matrix of p-values for each pair
         test_statistics: Matrix of F-statistics for each pair
     """
+    if not quiet:
+        print(f"\n*** DEBUG: make_stationary_if_needed = {make_stationary_if_needed} ***\n")
+        if not make_stationary_if_needed:
+            print("*** DIFFERENCING IS DISABLED - will skip even if non-stationary detected ***\n")
+
     T, num_agents = trajectories.shape
     
     A = np.zeros((num_agents, num_agents), dtype=int)
     p_values = np.ones((num_agents, num_agents))
     test_statistics = np.zeros((num_agents, num_agents))
     
-    print(f"\n{'='*60}")
-    print("Granger Causality Analysis")
-    print(f"{'='*60}")
-    print(f"Data shape: {trajectories.shape}")
-    print(f"Max lag: {max_lag}")
-    print(f"Significance level: {alpha}")
-    print(f"FDR correction method: {method}\n")
+    if not quiet:
+        print(f"\n{'='*60}")
+        print("Granger Causality Analysis")
+        print(f"{'='*60}")
+        print(f"Data shape: {trajectories.shape}")
+        print(f"Max lag: {max_lag}")
+        print(f"Significance level: {alpha}")
+        print(f"FDR correction method: {method}\n")
+
+    original_trajectories = trajectories.copy()
+    if check_stationarity:
+        if not quiet:
+            stationarity_results = test_stationarity(trajectories)
+        else:
+            stationarity_results = {'is_stationary': {}}
+            for i in range(trajectories.shape[1]):
+                try:
+                    adf_result = adfuller(trajectories[:, i], autolag='AIC')
+                    stationarity_results['is_stationary'][i] = adf_result[1] < 0.05
+                except:
+                    stationarity_results['is_stationary'][i] = False
+        
+        non_stationary = [i for i, is_stat in stationarity_results['is_stationary'].items() if not is_stat]
+        
+        if non_stationary:
+            if make_stationary_if_needed:
+                if not quiet:
+                    print(f"\nWarning: {len(non_stationary)} series appear non-stationary: {non_stationary}")
+                    print("Note: Differencing may remove causal relationships found in original data.")
+                    print("Proceeding with differencing to ensure valid statistical tests...")
+                trajectories, _ = make_stationary(trajectories, method='diff')
+                T = trajectories.shape[0]
+                
+                if not quiet:
+                    print("\nRe-testing stationarity after differencing...")
+                    stationarity_results = test_stationarity(trajectories)
+            else:
+                if not quiet:
+                    print(f"\nWarning: {len(non_stationary)} series appear non-stationary but differencing is DISABLED (--no-differencing flag set).")
+                    print("Using original (non-stationary) data. Results may be unreliable due to non-stationarity.")
+                    print("If you want to apply differencing, remove the --no-differencing flag.")
     
     try:
         model = VAR(trajectories)
         lag_order = model.select_order(maxlags=max_lag)
         optimal_lag = lag_order.selected_orders.get('aic', max_lag)
         optimal_lag = min(optimal_lag, max_lag)
-        
-        # Granger causality requires at least lag 1
         if optimal_lag == 0:
-            print(f"Warning: Optimal lag is 0, but Granger causality requires lag >= 1")
-            print(f"Using minimum lag of 1 for Granger causality tests")
+            if not quiet:
+                print(f"Warning: Optimal lag is 0, but Granger causality requires lag >= 1")
+                print(f"Using minimum lag of 1 for Granger causality tests")
             optimal_lag = 1
         
-        print(f"Optimal lag selected: {optimal_lag}")
+        if not quiet:
+            print(f"Optimal lag selected: {optimal_lag}")
         
         fitted_model = model.fit(optimal_lag)
         
-        print("\nModel Diagnostics:")
-        print(f"  - AIC: {fitted_model.aic:.4f}")
-        print(f"  - BIC: {fitted_model.bic:.4f}")
-        
-        try:
-            print(f"  - Residual diagnostics:")
-            for i in range(num_agents):
-                residuals_i = fitted_model.resid[:, i]
-                if residuals_i.ndim > 1:
-                    residuals_i = residuals_i.flatten()
-                ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
-                lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
-                if lb_pvalue < 0.05:
-                    print(f"    Agent {i}: p={lb_pvalue:.4f} (serial correlation detected)")
-                else:
-                    print(f"    Agent {i}: p={lb_pvalue:.4f} ✓ (no serial correlation)")
-        except Exception as e:
-            print(f"  - Residual diagnostics failed: {e}")
+        if not quiet:
+            print("\nModel Diagnostics:")
+            print(f"  - AIC: {fitted_model.aic:.4f}")
+            print(f"  - BIC: {fitted_model.bic:.4f}")
+            
+            try:
+                print(f"  - Residual diagnostics:")
+                for i in range(num_agents):
+                    residuals_i = fitted_model.resid[:, i]
+                    if residuals_i.ndim > 1:
+                        residuals_i = residuals_i.flatten()
+                    ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
+                    lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
+                    if lb_pvalue < 0.05:
+                        print(f"    Agent {i}: p={lb_pvalue:.4f} (serial correlation detected)")
+                    else:
+                        print(f"    Agent {i}: p={lb_pvalue:.4f} ✓ (no serial correlation)")
+            except Exception as e:
+                print(f"  - Residual diagnostics failed: {e}")
         
     except Exception as e:
         print(f"Warning: VAR model fitting failed: {e}")
         print("Using default lag order")
         optimal_lag = max_lag
         fitted_model = model.fit(optimal_lag)
-    
-    # Perform Granger causality tests for each pair
-    print(f"\nTesting {num_agents * (num_agents - 1)} pairs for Granger causality...")
+    if not quiet:
+        print(f"\nTesting {num_agents * (num_agents - 1)} pairs for Granger causality...")
     
     all_p_values = []
     test_results = []
@@ -159,22 +274,29 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
                 test_results.append((j, i, p_val, f_stat))
                 
             except Exception as e:
-                print(f"Warning: Granger test failed for {i} -> {j}: {e}")
+                if not quiet:
+                    print(f"Warning: Granger test failed for {i} -> {j}: {e}")
                 p_values[j, i] = 1.0
                 test_statistics[j, i] = 0.0
-
-    # Handle case where all tests failed (no p-values)
     if len(all_p_values) == 0:
-        print(f"\nWarning: No valid Granger causality tests (all tests failed)")
-        print(f"Influence matrix will be all zeros")
+        if not quiet:
+            print(f"\nWarning: No valid Granger causality tests (all tests failed)")
+            print(f"Influence matrix will be all zeros")
         return A, p_values, test_statistics
-    
-    print(f"\nApplying FDR correction ({method})...")
+    if not quiet:
+        print(f"\nRaw p-values (before FDR correction):")
+        idx = 0
+        for j in range(num_agents):
+            for i in range(num_agents):
+                if i != j:
+                    print(f"  Agent {i} -> Agent {j}: p={all_p_values[idx]:.6f}")
+                    idx += 1
+        
+        print(f"\nApplying FDR correction ({method})...")
     all_p_values = np.array(all_p_values)
-    
-    # Check if we have any valid p-values
     if len(all_p_values) == 0 or np.all(np.isnan(all_p_values)):
-        print(f"Warning: No valid p-values for FDR correction")
+        if not quiet:
+            print(f"Warning: No valid p-values for FDR correction")
         return A, p_values, test_statistics
     
     rejected, pvals_corrected, _, _ = multipletests(
@@ -189,15 +311,17 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, method='fdr_
             
             if rejected[corrected_idx]:
                 A[j, i] = 1
-                print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f}")
+                if not quiet:
+                    print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f}")
             
             corrected_idx += 1
     
-    print(f"\n{'='*60}")
-    print(f"Influence Matrix (A[j,i] = 1 if i Granger-causes j):")
-    print(f"{'='*60}")
-    print(A)
-    print(f"\nTotal causal relationships found: {np.sum(A)}")
+    if not quiet:
+        print(f"\n{'='*60}")
+        print(f"Influence Matrix (A[j,i] = 1 if i Granger-causes j):")
+        print(f"{'='*60}")
+        print(A)
+        print(f"\nTotal causal relationships found: {np.sum(A)}")
     
     return A, p_values, test_statistics
 
@@ -248,7 +372,9 @@ def compute_influence_statistics(A, A_ground_truth=None):
         stats['tn'] = int(tn)
     return stats
 
-def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3, time_windows=None):
+def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3, time_windows=None, 
+                                          rolling_window_size=None, rolling_step_size=None, 
+                                          num_temporal_windows=None, data=None):
     """
     Args:
         A: Direct influence matrix (from Granger causality)
@@ -281,32 +407,28 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
     results['global_k_hops'] = global_k_hops
 
     if time_windows is None:
-        # Adaptive number of windows based on data length
-        # Ensure each window has enough data for reliable analysis
-        # Use larger minimum for better statistical power (150-200 points recommended)
-        min_window_size = max((5 * num_agents * 2) + 10, 150)  # At least 150 points for reliability
+        min_window_size = max((5 * num_agents * 2) + 10, 150)
+        if num_temporal_windows is not None:
+            target_num_windows = num_temporal_windows
+        else:
+            max_windows = max(1, int((T - min_window_size) / min_window_size))
+            target_num_windows = min(3, max_windows)
+        
         if len(timesteps) > 0:
             total_time = timesteps[-1] - timesteps[0]
-            # Calculate max windows that still meet minimum size
-            max_windows = max(1, int((T - min_window_size) / min_window_size))
-            num_windows = min(3, max_windows)  # Use at most 3 windows
-            if num_windows == 0:
-                # If we can't even fit 1 window, use 1 window with all data
-                num_windows = 1
-            window_size = total_time / num_windows
-            time_windows = [timesteps[0] + i * window_size for i in range(num_windows + 1)]
+            if target_num_windows == 0:
+                target_num_windows = 1
+            window_size = total_time / target_num_windows
+            time_windows = [timesteps[0] + i * window_size for i in range(target_num_windows + 1)]
         else:
-            # Use data indices if no timesteps
-            max_windows = max(1, int((T - min_window_size) / min_window_size))
-            num_windows = min(3, max_windows)
-            if num_windows == 0:
-                num_windows = 1
-            window_size = T / num_windows
-            time_windows = [int(i * window_size) for i in range(num_windows + 1)]
+            if target_num_windows == 0:
+                target_num_windows = 1
+            window_size = T / target_num_windows
+            time_windows = [int(i * window_size) for i in range(target_num_windows + 1)]
         
-        print(f"Auto-generated {num_windows} time windows (minimum {min_window_size} points per window)")
-        if T < min_window_size * num_windows:
-            print(f"Warning: Total data ({T} points) may be insufficient for {num_windows} windows")
+        print(f"Auto-generated {target_num_windows} time windows (minimum {min_window_size} points per window)")
+        if T < min_window_size * target_num_windows:
+            print(f"Warning: Total data ({T} points) may be insufficient for {target_num_windows} windows")
             print(f"Consider collecting more trajectory data for reliable temporal analysis")
     
     print(f"\n{'='*60}")
@@ -324,30 +446,46 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             mask = np.arange(T) >= int(window_start)
             mask = mask & (np.arange(T) < int(window_end))
         window_data = trajectories[mask]
-        
-        # Minimum data requirements for reliable VAR analysis
-        # Need at least: (max_lag * num_agents * 2) + 10 observations
         min_required = (5 * num_agents * 2) + 10
         if len(window_data) < min_required:
             print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}):")
             print(f"  Insufficient data: {len(window_data)} points (minimum: {min_required})")
             print(f"  Skipping this window")
             continue
+        data_indices = np.where(mask)[0]
+        first_idx = data_indices[0] if len(data_indices) > 0 else None
+        last_idx = data_indices[-1] if len(data_indices) > 0 else None
+        episode_info = ""
+        if data is not None:
+            episode_timesteps = data.get('episode_timesteps', None)
+            if episode_timesteps is not None and len(episode_timesteps) > 0:
+                if len(timesteps) > 0:
+                    window_timesteps = timesteps[mask]
+                    if len(window_timesteps) > 0:
+                        min_ts = window_timesteps[0]
+                        max_ts = window_timesteps[-1]
+                        episode_mask = (episode_timesteps >= min_ts) & (episode_timesteps <= max_ts)
+                        episode_nums = np.where(episode_mask)[0]
+                        if len(episode_nums) > 0:
+                            episode_info = f"  Episodes: {episode_nums[0]} to {episode_nums[-1]} (approx {len(episode_nums)} episodes)"
         
         print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}):")
         print(f"  Data points: {len(window_data)}")
+        print(f"  Data indices: {first_idx} to {last_idx}")
+        if len(timesteps) > 0:
+            window_timesteps = timesteps[mask]
+            if len(window_timesteps) > 0:
+                print(f"  Timestep range: {window_timesteps[0]:.0f} to {window_timesteps[-1]:.0f}")
+        if episode_info:
+            print(episode_info)
 
         try:
-            # Adaptive lag: ensure we have enough data for the lag
-            # Rule: need at least (lag * num_agents * 2) observations
             adaptive_max_lag = 5
             for test_lag in range(5, 0, -1):
                 required_obs = (test_lag * num_agents * 2) + 10
                 if len(window_data) >= required_obs:
                     adaptive_max_lag = test_lag
                     break
-            
-            # Ensure minimum lag of 1 for Granger causality
             adaptive_max_lag = max(1, adaptive_max_lag)
             
             print(f"  Using max_lag: {adaptive_max_lag} (based on {len(window_data)} observations)")
@@ -355,18 +493,36 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             A_window, _, _ = estimate_influence_granger(
                 window_data, 
                 max_lag=adaptive_max_lag,
-                alpha=0.05
+                alpha=0.1
             )
-            
-            # Compute k-hops for this window
             k_hops_window = compute_k_hops_propagation(A_window, max_hops=max_hops)
-            
-            results['temporal_windows'][window_idx] = {
+            window_info = {
                 'time_range': (window_start, window_end),
+                'data_indices': (first_idx, last_idx) if first_idx is not None else None,
                 'influence_matrix': A_window,
                 'k_hops': k_hops_window,
-                'num_data_points': len(window_data)
+                'num_data_points': len(window_data),
+                'data_mask': mask
             }
+            if len(timesteps) > 0:
+                window_timesteps = timesteps[mask]
+                if len(window_timesteps) > 0:
+                    window_info['timestep_range'] = (float(window_timesteps[0]), float(window_timesteps[-1]))
+
+            if data is not None:
+                episode_timesteps = data.get('episode_timesteps', None)
+                if episode_timesteps is not None and len(timesteps) > 0:
+                    window_timesteps = timesteps[mask]
+                    if len(window_timesteps) > 0:
+                        min_ts = window_timesteps[0]
+                        max_ts = window_timesteps[-1]
+                        episode_mask = (episode_timesteps >= min_ts) & (episode_timesteps <= max_ts)
+                        episode_nums = np.where(episode_mask)[0]
+                        if len(episode_nums) > 0:
+                            window_info['episode_range'] = (int(episode_nums[0]), int(episode_nums[-1]))
+                            window_info['num_episodes'] = len(episode_nums)
+            
+            results['temporal_windows'][window_idx] = window_info
             
             print(f"  Direct links: {np.sum(A_window)}")
             for k in range(2, max_hops + 1):
@@ -377,7 +533,6 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             print(f"  Error analyzing window: {e}")
             import traceback
             print(f"  Traceback: {traceback.format_exc()}")
-            # Store failed window with zero matrix
             results['temporal_windows'][window_idx] = {
                 'time_range': (window_start, window_end),
                 'influence_matrix': np.zeros((num_agents, num_agents), dtype=int),
@@ -389,14 +544,37 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
     print(f"\n{'='*60}")
     print("Rolling Window Analysis")
     print(f"{'='*60}")
+    min_window_size = (3 * num_agents * 2) + 10
     
-    # Adaptive window size based on data length
-    # Ensure minimum window size for reliable analysis
-    min_window_size = (3 * num_agents * 2) + 10  # Minimum for lag=3
-    window_size = max(min_window_size, min(100, T // 5))
-    step_size = max(1, window_size // 2)  # 50% overlap, minimum step of 1
+    if rolling_window_size is not None:
+        if rolling_window_size < min_window_size:
+            print(f"Warning: Specified window size ({rolling_window_size}) is below minimum ({min_window_size})")
+            print(f"Using minimum window size: {min_window_size}")
+            window_size = min_window_size
+        elif rolling_window_size > T:
+            print(f"Warning: Specified window size ({rolling_window_size}) exceeds data length ({T})")
+            print(f"Using data length as window size: {T}")
+            window_size = T
+        else:
+            window_size = rolling_window_size
+    else:
+        window_size = max(min_window_size, min(150, T // 2))
+    
+    if rolling_step_size is not None:
+        if rolling_step_size < 1:
+            print(f"Warning: Step size must be >= 1, using 1")
+            step_size = 1
+        elif rolling_step_size >= window_size:
+            print(f"Warning: Step size ({rolling_step_size}) >= window size ({window_size}), using 50% overlap")
+            step_size = max(1, window_size // 2)
+        else:
+            step_size = rolling_step_size
+    else:
+        step_size = max(1, window_size // 2)
     
     print(f"Rolling window size: {window_size}, step size: {step_size}")
+    if rolling_window_size is None:
+        print(f"  (Using adaptive window size - can override with --rolling-window-size)")
     
     rolling_results = []
     
@@ -408,14 +586,12 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             window_times = (timesteps[start_idx], timesteps[end_idx-1])
         else:
             window_times = (start_idx, end_idx-1)
-        
-        # Check minimum data requirements
+
         min_required = (3 * num_agents * 2) + 10
         if len(window_data) < min_required:
             continue
         
         try:
-            # Adaptive lag for rolling windows
             adaptive_max_lag = 3
             for test_lag in range(3, 0, -1):
                 required_obs = (test_lag * num_agents * 2) + 10
@@ -427,7 +603,7 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             A_rolling, _, _ = estimate_influence_granger(
                 window_data,
                 max_lag=adaptive_max_lag,
-                alpha=0.05
+                alpha=0.1
             )
             
             direct_links = np.sum(A_rolling)
@@ -440,7 +616,6 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             })
         
         except Exception as e:
-            # Silently skip failed rolling windows (too many to print)
             continue
     
     results['rolling_analysis'] = {
@@ -519,8 +694,7 @@ def compute_k_hops_propagation(A, max_hops=3):
         cumulative_matrices[k] = cumulative
         num_total = np.sum(cumulative)
         print(f"\nUp to {k}-hops: {num_total} total influence relationships")
-        
-        # Show new relationships discovered at this hop level
+
         if k > 1:
             prev_cumulative = cumulative_matrices[k-1]
             new_relationships = cumulative - prev_cumulative
@@ -621,9 +795,7 @@ def compute_temporal_spillover_operator(A_history, gamma_spatial=0.9,
             raise ValueError(f"All matrices must have shape ({n}, {n}). Matrix {i} has shape {A_t.shape}")
     
     S = np.zeros((n, n))
-    
-    # Compute EWMA weights (most recent gets highest weight)
-    # weights[t] = gamma_temporal^(T-1-t) / sum(weights)
+
     weights = np.array([gamma_temporal ** (T - 1 - t) for t in range(T)])
     weights /= weights.sum() 
     
@@ -737,6 +909,99 @@ def compute_jacobian_correlation(trajectories):
     return jacobian
 
 
+def analyze_tss_factors(S, jacobian, A_history=None):
+    """
+    Args:
+        S: Spillover operator matrix
+        jacobian: Jacobian matrix
+        A_history: Optional list of influence matrices for detailed analysis
+    
+    Returns:
+        analysis: Dictionary with analysis and recommendations
+    """
+    num_agents = S.shape[0]
+    
+    print(f"\n{'='*60}")
+    print("TSS Factor Analysis")
+    print(f"{'='*60}")
+
+    S_nonzero = np.count_nonzero(S)
+    S_max = np.max(S)
+    S_mean = np.mean(S[S > 0]) if S_nonzero > 0 else 0
+    S_total = np.sum(S)
+    
+    print(f"\nSpillover Operator (S) Analysis:")
+    print(f"  Total sum: {S_total:.4f}")
+    print(f"  Non-zero entries: {S_nonzero} / {num_agents * num_agents}")
+    print(f"  Max value: {S_max:.4f}")
+    print(f"  Mean (non-zero): {S_mean:.4f}")
+    
+    jacobian_abs = np.abs(jacobian)
+    jacobian_nonzero = np.count_nonzero(jacobian_abs)
+    jacobian_max = np.max(jacobian_abs)
+    jacobian_mean = np.mean(jacobian_abs[jacobian_abs > 0]) if jacobian_nonzero > 0 else 0
+    jacobian_total = np.sum(jacobian_abs)
+    
+    print(f"\nJacobian (|J|) Analysis:")
+    print(f"  Total sum: {jacobian_total:.4f}")
+    print(f"  Non-zero entries: {jacobian_nonzero} / {num_agents * num_agents}")
+    print(f"  Max value: {jacobian_max:.4f}")
+    print(f"  Mean (non-zero): {jacobian_mean:.4f}")
+
+    tss_matrix = S * jacobian_abs
+    tss_total = np.sum(tss_matrix)
+    tss_max = np.max(tss_matrix)
+    tss_mean = np.mean(tss_matrix[tss_matrix > 0]) if np.count_nonzero(tss_matrix) > 0 else 0
+    
+    print(f"\nTSS Matrix (S × |J|) Analysis:")
+    print(f"  Total TSS: {tss_total:.4f}")
+    print(f"  Max value: {tss_max:.4f}")
+    print(f"  Mean (non-zero): {tss_mean:.4f}")
+
+    recommendations = []
+    
+    if S_total < num_agents * 0.5:
+        recommendations.append("LOW SPILLOVER OPERATOR: Increase causal relationships detected")
+        recommendations.append("  - Lower alpha (e.g., --alpha 0.01) to detect more causal links")
+        recommendations.append("  - Increase k-hops (e.g., --k-hops 5) to include more indirect paths")
+        recommendations.append("  - Increase gamma_spatial (e.g., --gamma-spatial 0.95) to weight indirect paths more")
+    
+    if jacobian_total < num_agents * 0.5:
+        recommendations.append("LOW JACOBIAN: Agents may not be strongly correlated")
+        recommendations.append("  - Check if agents are actually learning together")
+        recommendations.append("  - Consider using different metric (--metric policy_params or episode_rewards)")
+        recommendations.append("  - Ensure sufficient training data for stable correlations")
+    
+    if S_nonzero < num_agents * (num_agents - 1) * 0.3:
+        recommendations.append("SPARSE CAUSAL NETWORK: Few causal relationships detected")
+        recommendations.append("  - Use --no-differencing if differencing removes relationships")
+        recommendations.append("  - Increase temporal windows (--num-temporal-windows 4-5)")
+        recommendations.append("  - Check stationarity - may need different preprocessing")
+    
+    if tss_total < num_agents * (num_agents - 1) * 0.1:
+        recommendations.append("LOW TSS OVERALL: Both S and Jacobian may need improvement")
+        recommendations.append("  - Increase gamma_temporal (e.g., --gamma-temporal 0.98) for recent windows")
+        recommendations.append("  - Ensure agents have meaningful interactions in the environment")
+    
+    if recommendations:
+        print(f"\n{'='*60}")
+        print("Recommendations to Increase TSS:")
+        print(f"{'='*60}")
+        for rec in recommendations:
+            print(f"  {rec}")
+    else:
+        print(f"\n✓ TSS factors appear well-balanced")
+    
+    return {
+        'S_total': S_total,
+        'S_nonzero': S_nonzero,
+        'jacobian_total': jacobian_total,
+        'jacobian_nonzero': jacobian_nonzero,
+        'tss_total': tss_total,
+        'recommendations': recommendations
+    }
+
+
 def compute_tss(S, jacobian, normalize=True):
     """
     Args:
@@ -772,8 +1037,6 @@ def compute_tss(S, jacobian, normalize=True):
         
         print(f"Max possible spillover: {max_spillover}")
         print(f"TSS (normalized): {tss_percent:.2f}%")
-        
-        # Sanity check
         if 50 <= tss_percent <= 70:
             print("✓ TSS in expected range for typical MARL (50-70%)")
         elif tss_percent < 50:
@@ -784,6 +1047,327 @@ def compute_tss(S, jacobian, normalize=True):
         return tss, tss_percent
     
     return tss, None
+
+
+def test_multiple_window_sizes(trajectories, timesteps, window_sizes=[100, 125, 175, 200], 
+                                max_lag=5, alpha=0.1, make_stationary_if_needed=True):
+    """
+    Args:
+        trajectories: Time series data (T, num_agents)
+        timesteps: Array of timesteps
+        window_sizes: List of window sizes to test
+        max_lag: Maximum lag for VAR model
+        alpha: Significance level
+        make_stationary_if_needed: Whether to apply differencing if needed
+    
+    Returns:
+        results: Dictionary with results for each window size
+    """
+    T, num_agents = trajectories.shape
+    
+    print(f"\n{'='*60}")
+    print("Testing Multiple Window Sizes")
+    print(f"{'='*60}")
+    print(f"Testing window sizes: {window_sizes}")
+    print(f"Total data points: {T}")
+    
+    results = {}
+    
+    for window_size in window_sizes:
+        if window_size > T:
+            print(f"\nSkipping window size {window_size} (exceeds data length {T})")
+            continue
+        
+        print(f"\n{'='*60}")
+        print(f"Testing window size: {window_size}")
+        print(f"{'='*60}")
+        
+        step_size = max(1, window_size // 2)  # 50% overlap
+        num_windows = max(1, (T - window_size) // step_size + 1)
+        
+        print(f"Step size: {step_size}")
+        print(f"Number of windows: {num_windows}")
+        
+        window_results = []
+        causal_links_per_window = []
+        
+        for start_idx in range(0, T - window_size + 1, step_size):
+            end_idx = start_idx + window_size
+            window_data = trajectories[start_idx:end_idx]
+
+            min_required = (max_lag * num_agents * 2) + 10
+            if len(window_data) < min_required:
+                continue
+            
+            try:
+                adaptive_max_lag = max_lag
+                for test_lag in range(max_lag, 0, -1):
+                    required_obs = (test_lag * num_agents * 2) + 10
+                    if len(window_data) >= required_obs:
+                        adaptive_max_lag = test_lag
+                        break
+                adaptive_max_lag = max(1, adaptive_max_lag)
+                
+                A_window, p_values_window, _ = estimate_influence_granger(
+                    window_data,
+                    max_lag=adaptive_max_lag,
+                    alpha=alpha,
+                    check_stationarity=True,
+                    make_stationary_if_needed=make_stationary_if_needed,
+                    quiet=True
+                )
+                
+                num_links = np.sum(A_window)
+                causal_links_per_window.append(num_links)
+                
+                window_results.append({
+                    'start_idx': start_idx,
+                    'end_idx': end_idx,
+                    'num_links': int(num_links),
+                    'influence_matrix': A_window,
+                    'p_values': p_values_window
+                })
+                
+            except Exception as e:
+                continue
+        
+        if len(causal_links_per_window) > 0:
+            results[window_size] = {
+                'window_results': window_results,
+                'mean_links': np.mean(causal_links_per_window),
+                'std_links': np.std(causal_links_per_window),
+                'min_links': np.min(causal_links_per_window),
+                'max_links': np.max(causal_links_per_window),
+                'num_windows': len(window_results),
+                'stability': np.std(causal_links_per_window) / (np.mean(causal_links_per_window) + 1e-10)  # Coefficient of variation
+            }
+            
+            print(f"\nSummary for window size {window_size}:")
+            print(f"  Mean causal links: {results[window_size]['mean_links']:.2f}")
+            print(f"  Std causal links: {results[window_size]['std_links']:.2f}")
+            print(f"  Range: [{results[window_size]['min_links']}, {results[window_size]['max_links']}]")
+            print(f"  Stability (CV): {results[window_size]['stability']:.3f} (lower is better)")
+            print(f"  Windows analyzed: {results[window_size]['num_windows']}")
+        else:
+            print(f"\nNo valid windows for size {window_size}")
+    
+    return results
+
+
+def plot_causal_vs_training_curves(temporal_results, data, save_path=None):
+    """
+    Args:
+        temporal_results: Results from compute_k_hops_propagation_with_time
+        data: Original trajectory data dictionary
+        save_path: Optional path to save the figure
+    """
+    import matplotlib.pyplot as plt
+    
+    if 'temporal_windows' not in temporal_results or len(temporal_results['temporal_windows']) == 0:
+        print("No temporal window results available for plotting")
+        return
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    windows = temporal_results['temporal_windows']
+    window_indices = sorted(windows.keys())
+
+    ax1 = axes[0, 0]
+    window_midpoints = []
+    num_links = []
+    for idx in window_indices:
+        window_info = windows[idx]
+        if 'timestep_range' in window_info:
+            midpoint = (window_info['timestep_range'][0] + window_info['timestep_range'][1]) / 2
+        elif 'data_indices' in window_info and window_info['data_indices']:
+            midpoint = (window_info['data_indices'][0] + window_info['data_indices'][1]) / 2
+        else:
+            midpoint = idx
+        window_midpoints.append(midpoint)
+        num_links.append(np.sum(window_info['influence_matrix']))
+    
+    ax1.plot(window_midpoints, num_links, 'o-', linewidth=2, markersize=8)
+    ax1.set_xlabel('Timestep (midpoint of window)', fontsize=12)
+    ax1.set_ylabel('Number of Causal Links', fontsize=12)
+    ax1.set_title('Causal Relationships Over Time', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[0, 1]
+    num_agents = windows[window_indices[0]]['influence_matrix'].shape[0]
+    for i in range(num_agents):
+        for j in range(num_agents):
+            if i != j:
+                links = []
+                for idx in window_indices:
+                    A = windows[idx]['influence_matrix']
+                    links.append(A[j, i])
+                ax2.plot(window_midpoints, links, 'o-', label=f'Agent {i} → Agent {j}', 
+                        linewidth=2, markersize=6)
+    ax2.set_xlabel('Timestep (midpoint of window)', fontsize=12)
+    ax2.set_ylabel('Causal Link (1=present, 0=absent)', fontsize=12)
+    ax2.set_title('Individual Causal Relationships', fontsize=14, fontweight='bold')
+    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(-0.1, 1.1)
+
+    ax3 = axes[1, 0]
+    if 'episode_rewards' in data and len(data['episode_rewards']) > 0:
+        episode_timesteps = data.get('episode_timesteps', None)
+        for agent_idx in range(num_agents):
+            if agent_idx in data['episode_rewards']:
+                rewards = data['episode_rewards'][agent_idx]
+                if episode_timesteps is not None and len(episode_timesteps) == len(rewards):
+                    ax3.plot(episode_timesteps, rewards, alpha=0.6, label=f'Agent {agent_idx}', linewidth=1.5)
+                else:
+                    ax3.plot(rewards, alpha=0.6, label=f'Agent {agent_idx}', linewidth=1.5)
+        ax3.set_xlabel('Timestep', fontsize=12)
+        ax3.set_ylabel('Episode Reward', fontsize=12)
+        ax3.set_title('Training Curves: Episode Rewards', fontsize=14, fontweight='bold')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        for idx in window_indices:
+            window_info = windows[idx]
+            if 'timestep_range' in window_info:
+                ax3.axvline(window_info['timestep_range'][0], color='gray', linestyle='--', alpha=0.5)
+                ax3.axvline(window_info['timestep_range'][1], color='gray', linestyle='--', alpha=0.5)
+    else:
+        ax3.text(0.5, 0.5, 'Episode rewards not available', 
+                ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('Training Curves: Episode Rewards', fontsize=14, fontweight='bold')
+
+    ax4 = axes[1, 1]
+    if 'agent_values' in data:
+        timesteps_all = data.get('timesteps', np.arange(len(data['agent_values'][0])))
+        for agent_idx in range(num_agents):
+            if agent_idx in data['agent_values']:
+                values = data['agent_values'][agent_idx]
+                ax4.plot(timesteps_all[:len(values)], values, alpha=0.6, 
+                        label=f'Agent {agent_idx}', linewidth=1.5)
+
+        for idx in window_indices:
+            window_info = windows[idx]
+            if 'timestep_range' in window_info:
+                ax4.axvline(window_info['timestep_range'][0], color='red', linestyle='--', alpha=0.5, linewidth=2)
+                ax4.axvline(window_info['timestep_range'][1], color='red', linestyle='--', alpha=0.5, linewidth=2)
+        
+        ax4.set_xlabel('Timestep', fontsize=12)
+        ax4.set_ylabel('Agent Value', fontsize=12)
+        ax4.set_title('Agent Values with Window Boundaries', fontsize=14, fontweight='bold')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+    else:
+        ax4.text(0.5, 0.5, 'Agent values not available', 
+                ha='center', va='center', transform=ax4.transAxes)
+        ax4.set_title('Agent Values', fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"\nTraining curve comparison plot saved to: {save_path}")
+    else:
+        plt.show()
+
+
+def validate_reversal_pattern(temporal_results, min_consistency=2):
+    """
+    Args:
+        temporal_results: Results from compute_k_hops_propagation_with_time
+        min_consistency: Minimum number of consecutive windows showing same pattern
+    
+    Returns:
+        validation_report: Dictionary with validation results
+    """
+    if 'temporal_windows' not in temporal_results or len(temporal_results['temporal_windows']) == 0:
+        return {'error': 'No temporal window results available'}
+    
+    windows = temporal_results['temporal_windows']
+    window_indices = sorted(windows.keys())
+    
+    if len(window_indices) < 2:
+        return {'error': 'Need at least 2 windows for validation'}
+    
+    print(f"\n{'='*60}")
+    print("Reversal Pattern Validation")
+    print(f"{'='*60}")
+    
+    num_agents = windows[window_indices[0]]['influence_matrix'].shape[0]
+
+    patterns_over_time = []
+    for idx in window_indices:
+        A = windows[idx]['influence_matrix']
+        out_degree = np.sum(A, axis=0)
+        in_degree = np.sum(A, axis=1)
+        
+        patterns_over_time.append({
+            'out_degree': out_degree.copy(),
+            'in_degree': in_degree.copy(),
+            'total_links': np.sum(A),
+            'dominant_influencer': np.argmax(out_degree) if np.max(out_degree) > 0 else None,
+            'most_influenced': np.argmax(in_degree) if np.max(in_degree) > 0 else None
+        })
+
+    validation_report = {
+        'patterns': patterns_over_time,
+        'reversals_detected': [],
+        'is_valid': True,
+        'warnings': []
+    }
+    dominant_influencers = [p['dominant_influencer'] for p in patterns_over_time if p['dominant_influencer'] is not None]
+    if len(dominant_influencers) >= min_consistency:
+        for i in range(len(dominant_influencers) - min_consistency + 1):
+            window_group = dominant_influencers[i:i+min_consistency]
+            if len(set(window_group)) == 1:
+                if i + min_consistency < len(dominant_influencers):
+                    next_group = dominant_influencers[i+min_consistency:i+2*min_consistency]
+                    if len(next_group) == min_consistency and len(set(next_group)) == 1:
+                        if window_group[0] != next_group[0]:
+                            validation_report['reversals_detected'].append({
+                                'type': 'dominant_influencer',
+                                'from': window_group[0],
+                                'to': next_group[0],
+                                'window_range': (i, i + 2*min_consistency - 1)
+                            })
+
+    total_links = [p['total_links'] for p in patterns_over_time]
+    links_std = np.std(total_links)
+    links_mean = np.mean(total_links)
+    if links_mean > 0:
+        cv = links_std / links_mean
+        if cv > 0.5:
+            validation_report['warnings'].append(
+                f"High variability in causal links (CV={cv:.2f}). Results may be unstable."
+            )
+
+    print(f"\nPattern Analysis:")
+    for i, pattern in enumerate(patterns_over_time):
+        print(f"  Window {i+1}:")
+        print(f"    Total links: {pattern['total_links']}")
+        print(f"    Out-degree: {pattern['out_degree']}")
+        print(f"    In-degree: {pattern['in_degree']}")
+        if pattern['dominant_influencer'] is not None:
+            print(f"    Dominant influencer: Agent {pattern['dominant_influencer']}")
+        if pattern['most_influenced'] is not None:
+            print(f"    Most influenced: Agent {pattern['most_influenced']}")
+    
+    if validation_report['reversals_detected']:
+        print(f"\nReversals Detected:")
+        for rev in validation_report['reversals_detected']:
+            print(f"  {rev['type']}: Agent {rev['from']} → Agent {rev['to']} "
+                  f"(windows {rev['window_range'][0]+1} to {rev['window_range'][1]+1})")
+    else:
+        print(f"\nNo clear reversals detected (need {min_consistency} consecutive windows)")
+    
+    if validation_report['warnings']:
+        print(f"\nWarnings:")
+        for warning in validation_report['warnings']:
+            print(f"  ⚠ {warning}")
+        validation_report['is_valid'] = False
+    else:
+        print(f"\n✓ Pattern appears statistically consistent")
+    
+    return validation_report
 
 
 def visualize_influence_matrix(A, p_values=None, save_path=None):
@@ -842,6 +1426,8 @@ def main():
                        help="Maximum lag for VAR model")
     parser.add_argument("--alpha", type=float, default=0.05,
                        help="Significance level for FDR correction")
+    parser.add_argument("--no-differencing", action="store_true",
+                       help="Disable automatic differencing for non-stationary data")
     parser.add_argument("--ground-truth", type=str, default=None,
                        help="Path to ground truth influence matrix (optional)")
     parser.add_argument("--save-results", type=str, default=None,
@@ -854,6 +1440,26 @@ def main():
                        help="Include temporal analysis with k-hops (requires k-hops > 0)")
     parser.add_argument("--time-windows", type=str, default=None,
                        help="Time window boundaries (comma-separated, e.g., '0,50000,100000,150000')")
+    parser.add_argument("--max-timestep", type=float, default=None,
+                       help="Maximum timestep to include in analysis (filters early training data)")
+    parser.add_argument("--min-timestep", type=float, default=None,
+                       help="Minimum timestep to include in analysis (filters late training data)")
+    parser.add_argument("--rolling-window-size", type=int, default=None,
+                       help="Size of rolling windows for temporal analysis (default: adaptive based on data length)")
+    parser.add_argument("--rolling-step-size", type=int, default=None,
+                       help="Step size for rolling windows (default: 50%% of window size for overlap)")
+    parser.add_argument("--num-temporal-windows", type=int, default=None,
+                       help="Number of temporal windows to analyze (default: adaptive, max 3)")
+    parser.add_argument("--test-window-sizes", action="store_true",
+                       help="Test multiple window sizes (100, 125, 175, 200) to find minimum reliable detection threshold")
+    parser.add_argument("--plot-training-curves", action="store_true",
+                       help="Plot causal relationships compared to training curves (rewards, losses)")
+    parser.add_argument("--validate-reversal", action="store_true",
+                       help="Validate reversal patterns for statistical consistency")
+    parser.add_argument("--gamma-spatial", type=float, default=0.9,
+                       help="Spatial discount factor for k-hops (0.0-1.0, higher = more weight on indirect paths, default: 0.9)")
+    parser.add_argument("--gamma-temporal", type=float, default=0.95,
+                       help="Temporal discount factor (0.0-1.0, higher = more weight on recent windows, default: 0.95)")
     
     args = parser.parse_args()
 
@@ -863,8 +1469,30 @@ def main():
     print(f"\nPreparing trajectories using metric: {args.metric}")
     trajectories, timesteps = prepare_trajectories(data, metric=args.metric, max_lag=args.max_lag)
 
+    if args.min_timestep is not None or args.max_timestep is not None:
+        if len(timesteps) == 0:
+            print("Warning: No timestep information available, cannot filter by timestep")
+        else:
+            mask = np.ones(len(timesteps), dtype=bool)
+            if args.min_timestep is not None:
+                mask = mask & (timesteps >= args.min_timestep)
+                print(f"Filtering: keeping timesteps >= {args.min_timestep}")
+            if args.max_timestep is not None:
+                mask = mask & (timesteps <= args.max_timestep)
+                print(f"Filtering: keeping timesteps <= {args.max_timestep}")
+            
+            trajectories = trajectories[mask]
+            timesteps = timesteps[mask]
+            print(f"Filtered data: {len(trajectories)} points (from {len(data.get('timesteps', []))} original)")
+            
+            if len(trajectories) < args.max_lag + 10:
+                raise ValueError(f"After filtering, only {len(trajectories)} points remain, need at least {args.max_lag + 10}")
+
     A, p_values, test_statistics = estimate_influence_granger(
-        trajectories, max_lag=args.max_lag, alpha=args.alpha
+        trajectories, 
+        max_lag=args.max_lag, 
+        alpha=args.alpha,
+        make_stationary_if_needed=not args.no_differencing
     )
 
     A_ground_truth = None
@@ -910,7 +1538,11 @@ def main():
             temporal_k_hops = compute_k_hops_propagation_with_time(
                 A, trajectories, timesteps, 
                 max_hops=args.k_hops,
-                time_windows=time_windows
+                time_windows=time_windows,
+                rolling_window_size=args.rolling_window_size,
+                rolling_step_size=args.rolling_step_size,
+                num_temporal_windows=args.num_temporal_windows,
+                data=data
             )
             
             temporal_spillover_operator = None
@@ -922,11 +1554,10 @@ def main():
                     for window_idx in sorted(windows.keys()):
                         A_history.append(windows[window_idx]['influence_matrix'])
                     
-                    # Compute temporal spillover operator
                     temporal_spillover_operator, temporal_weights = compute_temporal_spillover_operator(
                         A_history,
-                        gamma_spatial=0.9,
-                        gamma_temporal=0.95,
+                        gamma_spatial=args.gamma_spatial,
+                        gamma_temporal=args.gamma_temporal,
                         K=args.k_hops
                     )
                     
@@ -941,19 +1572,16 @@ def main():
                     print(f"\nInterpretation:")
                     print(f"  - S[j,i] = weighted spillover from agent i to agent j")
                     
-                    # Compute Jacobian and TSS
                     print(f"\n{'='*60}")
                     print("Computing Jacobian and TSS")
                     print(f"{'='*60}")
                     
-                    # Method 1: Finite differences
                     try:
                         jacobian_fd = compute_jacobian_finite_differences(
                             trajectories, 
                             window_size=10
                         )
                         
-                        # Method 2: Correlation (simple baseline)
                         jacobian_corr = compute_jacobian_correlation(trajectories)
                         
                         print(f"\n{'='*60}")
@@ -963,19 +1591,19 @@ def main():
                         print(jacobian_fd)
                         print("\nCorrelation Jacobian:")
                         print(jacobian_corr)
-                        
-                        # Compute TSS with both methods
                         print(f"\n{'='*60}")
                         print("TSS with Finite Differences Jacobian")
                         print(f"{'='*60}")
                         tss_fd, tss_fd_pct = compute_tss(temporal_spillover_operator, jacobian_fd, normalize=True)
+
+                        tss_analysis_fd = analyze_tss_factors(temporal_spillover_operator, jacobian_fd, A_history)
                         
                         print(f"\n{'='*60}")
                         print("TSS with Correlation Jacobian")
                         print(f"{'='*60}")
                         tss_corr, tss_corr_pct = compute_tss(temporal_spillover_operator, jacobian_corr, normalize=True)
-                        
-                        # Add to results
+                        tss_analysis_corr = analyze_tss_factors(temporal_spillover_operator, jacobian_corr, A_history)
+
                         temporal_k_hops['jacobian_finite_differences'] = jacobian_fd
                         temporal_k_hops['jacobian_correlation'] = jacobian_corr
                         temporal_k_hops['tss_finite_differences'] = tss_fd
@@ -987,6 +1615,31 @@ def main():
                         print(f"⚠ Warning: Could not compute Jacobian/TSS: {e}")
                         import traceback
                         traceback.print_exc()
+
+            if args.test_window_sizes:
+                print(f"\n{'='*60}")
+                print("Testing Multiple Window Sizes")
+                print(f"{'='*60}")
+                window_size_results = test_multiple_window_sizes(
+                    trajectories, timesteps,
+                    window_sizes=[100, 125, 175, 200],
+                    max_lag=args.max_lag,
+                    alpha=args.alpha,
+                    make_stationary_if_needed=not args.no_differencing
+                )
+                if temporal_k_hops:
+                    temporal_k_hops['window_size_comparison'] = window_size_results
+
+            if args.validate_reversal and temporal_k_hops:
+                validation_report = validate_reversal_pattern(temporal_k_hops, min_consistency=2)
+                if temporal_k_hops:
+                    temporal_k_hops['validation_report'] = validation_report
+
+            if args.plot_training_curves and temporal_k_hops:
+                plot_save_path = None
+                if args.save_results:
+                    plot_save_path = args.save_results.replace('.pkl', '_training_curves.png')
+                plot_causal_vs_training_curves(temporal_k_hops, data, save_path=plot_save_path)
 
     if args.visualize:
         save_path = args.save_results.replace('.pkl', '_influence_matrix.png') if args.save_results else None

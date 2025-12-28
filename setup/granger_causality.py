@@ -235,7 +235,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     
     return A
 
-
 def validate_influence_matrix(A_hat, A_true):
     """
     Args:
