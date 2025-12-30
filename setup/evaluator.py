@@ -10,7 +10,7 @@ def check_success_simple_spread(env):
         agent_positions = np.array([agent.state.p_pos for agent in base_env.world.agents])
         landmark_positions = np.array([landmark.state.p_pos for landmark in base_env.world.landmarks])
         
-        # Distance threshold for "covering" a landmark
+        # Distance for "covering" landmark
         threshold=0.6
         landmarks_covered = []
         for landmark_pos in landmark_positions:
@@ -24,19 +24,6 @@ def check_success_simple_spread(env):
 
 
 def evaluate(env, maddpg, agents, logger, global_step, num_episodes=10):
-    """
-    Args:
-        env: Environment to evaluate on
-        maddpg: MADDPG agent
-        agents: List of agent names
-        logger: Logger instance
-        global_step: Current training step
-        num_episodes: Number of episodes to evaluate
-    
-    Returns:
-        avg_rewards: Average reward per agent
-        success_rate: Percentage of successful episodes
-    """
     eval_episode_rewards = []
     successful_episodes = 0
     num_agents = len(agents)
@@ -79,7 +66,6 @@ def evaluate(env, maddpg, agents, logger, global_step, num_episodes=10):
     print(f"\n[Step {global_step}] Evaluation ({num_episodes} episodes):")
     for i, agent in enumerate(agents):
         print(f"  {agent}: {avg_rewards[i]:.2f}")
-    print(f"  Total: {np.sum(avg_rewards):.2f}")
     print(f"  Success Rate: {success_rate:.1f}% ({successful_episodes}/{num_episodes})")
     
     return avg_rewards, success_rate

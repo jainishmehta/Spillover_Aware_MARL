@@ -12,21 +12,10 @@ ENV_MAP = {
 
 
 def create_env(env_name, max_steps=25, tag_distance=0.1):
-    """
-    Create an environment.
-    
-    Args:
-        env_name: Name of the environment
-        max_steps: Maximum number of steps per episode
-        tag_distance: Distance threshold for relay race variant (only used for simple_spread_relay)
-    
-    Returns:
-        Environment instance
-    """
     if env_name not in ENV_MAP:
         raise ValueError(f"Unknown environment: {env_name}")
     
-    # Special handling for relay race variant
+    #relay race variant
     if env_name == 'simple_spread_relay':
         env = make_relay_race_env(
             max_cycles=max_steps,

@@ -219,13 +219,6 @@ class MADDPG:
             self.critic_optimizers[i].load_state_dict(checkpoint['critic_optimizers'][i])
     
     def get_value_estimates(self, states):
-        """
-        Args:
-            states: List of state arrays, one per agent (each can be 1D or 2D)
-            
-        Returns:
-            List of Q-value estimates, one per agent
-        """
         with torch.no_grad():
             states_tensors = []
             for state in states:

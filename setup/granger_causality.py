@@ -1,4 +1,6 @@
 import numpy as np
+import pickle
+import argparse
 from statsmodels.tsa.api import VAR
 from statsmodels.stats.multitest import multipletests
 from statsmodels.tsa.stattools import adfuller, kpss
@@ -8,22 +10,12 @@ warnings.filterwarnings('ignore')
 
 
 def test_stationarity(trajectories, agent_names=None):
-    """
-    Args:
-        trajectories: Array of shape (T, num_agents)
-        agent_names: Optional list of agent names for display
-    Returns:
-        results: Dictionary with stationarity test results
-    """
     T, num_agents = trajectories.shape
     
     if agent_names is None:
         agent_names = [f"Agent {i}" for i in range(num_agents)]
     
-    print(f"\n{'='*60}")
     print("Stationarity Tests")
-    print(f"{'='*60}")
-    
     results = {
         'adf': {},
         'kpss': {},
@@ -45,7 +37,10 @@ def test_stationarity(trajectories, agent_names=None):
             print(f"\n{agent_names[i]} - ADF Test:")
             print(f"  Statistic: {adf_stat:.4f}")
             print(f"  p-value: {adf_pvalue:.4f}")
-            print(f"  Stationary: {'Yes ✓' if adf_pvalue < 0.05 else 'No ✗'}")
+            if adf_pvalue < 0.05:
+                print(f"  Stationary: Under 0.05 p-value")
+            else:
+                print(f"  Stationary: Over 0.05 p-value")
         except Exception as e:
             print(f"  ADF test failed: {e}")
             results['adf'][i] = {'stationary': False}
@@ -62,28 +57,20 @@ def test_stationarity(trajectories, agent_names=None):
             print(f"\n{agent_names[i]} - KPSS Test:")
             print(f"  Statistic: {kpss_stat:.4f}")
             print(f"  p-value: {kpss_pvalue:.4f}")
-            print(f"  Stationary: {'Yes' if kpss_pvalue > 0.05 else 'No'}")
+            if kpss_pvalue > 0.05:
+                print(f"  Stationary: Over 0.05 p-value")
+            else:
+                print(f"  Stationary: Under 0.05 p-value")
         except Exception as e:
             print(f"  KPSS test failed: {e}")
             results['kpss'][i] = {'stationary': False}
         adf_stationary = results['adf'][i].get('stationary', False)
         kpss_stationary = results['kpss'][i].get('stationary', False)
         results['is_stationary'][i] = adf_stationary
-    
-    print(f"\n{'='*60}")
     return results
 
 
 def make_stationary(trajectories, method='diff'):
-    """
-    Args:
-        trajectories: Array of shape (T, num_agents)
-        method: 'diff' for first difference, 'diff2' for second difference
-    
-    Returns:
-        stationary_trajectories: Differenced time series
-        original_trajectories: Original (for reference)
-    """
     if method == 'diff':
         stationary = np.diff(trajectories, axis=0)
         print(f"Applied first differencing: {trajectories.shape} -> {stationary.shape}")
@@ -97,22 +84,9 @@ def make_stationary(trajectories, method='diff'):
 
 
 def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_stationarity=True, make_stationary_if_needed=True):
-    """
-    Args:
-        trajectories: Array of shape (T, num_agents) with time series data
-                     Each column is a time series for one agent
-        max_lag: Maximum lag to consider in VAR model
-        alpha: Significance level for FDR correction
-    
-    Returns:
-        A: Influence matrix where A[j,i] = 1 if agent i Granger-causes agent j
-           Shape: (num_agents, num_agents)
-    """
     T, num_agents = trajectories.shape
-
     A = np.zeros((num_agents, num_agents), dtype=int)
-    
-    print(f"Estimating influence matrix for {num_agents} agents...")
+
     print(f"Data shape: {trajectories.shape}, Max lag: {max_lag}")
 
     original_trajectories = trajectories.copy()
@@ -122,26 +96,15 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
         non_stationary = [i for i, is_stat in stationarity_results['is_stationary'].items() if not is_stat]
         
         if non_stationary and make_stationary_if_needed:
-            print(f"\nWarning: {len(non_stationary)} series appear non-stationary: {non_stationary}")
-            print("Note: Differencing may remove causal relationships found in original data.")
-            print("Proceeding with differencing to ensure valid statistical tests...")
-            print("(Use --no-differencing flag to skip this and use original data)")
             trajectories, _ = make_stationary(trajectories, method='diff')
             T = trajectories.shape[0] 
-    
-            print("\nRe-testing stationarity after differencing...")
             stationarity_results = test_stationarity(trajectories)
         elif non_stationary:
-            print(f"\nWarning: {len(non_stationary)} series appear non-stationary but differencing is disabled.")
             print("Results may be unreliable due to non-stationarity.")
     
     min_required = max_lag * num_agents * 2 
     if T < min_required:
         print(f"\nWarning: Only {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
-        print("Consider:")
-        print("  1. Collecting more trajectory data (longer training)")
-        print("  2. Reducing max_lag")
-        print("  3. Using a smaller collection interval")
 
     min_required = max_lag * num_agents * 2
     if T < min_required:
@@ -152,20 +115,16 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     lag_order = model.select_order(maxlags=max_lag)
     optimal_lag = lag_order.selected_orders.get('aic', max_lag)
     optimal_lag = min(optimal_lag, max_lag)
-    print(f"Optimal lag selected: {optimal_lag}")
 
     fitted_model = model.fit(optimal_lag)
 
-    print(f"\n{'='*60}")
     print("VAR Model Diagnostics")
-    print(f"{'='*60}")
     print(f"  - AIC: {fitted_model.aic:.4f}")
     print(f"  - BIC: {fitted_model.bic:.4f}")
     print(f"  - Effective observations: {T - optimal_lag}")
     print(f"  - Parameters per equation: {optimal_lag * num_agents}")
     print(f"  - Observations per parameter: {(T - optimal_lag) / (optimal_lag * num_agents):.2f}")
     try:
-        print(f"  - Residual diagnostics:")
         for i in range(num_agents):
             residuals_i = fitted_model.resid[:, i]
             try:
@@ -176,12 +135,11 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
                 ljung_box = acorr_ljungbox(residuals_i, lags=min(10, (T - optimal_lag) // 4), return_df=True)
                 lb_pvalue = ljung_box['lb_pvalue'].iloc[-1]
             except Exception as e:
-                print(f"    Agent {i}: Ljung-Box test failed: {e}")
                 continue
             if lb_pvalue < 0.05:
-                print(f"    Agent {i}: p={lb_pvalue:.4f} (serial correlation detected)")
+                print(f"    Agent {i}, serial correlation detected")
             else:
-                print(f"    Agent {i}: p={lb_pvalue:.4f} ✓ (no serial correlation)")
+                print(f"    Agent {i}, no serial correlation)")
     except Exception as e:
         print(f"  - Ljung-Box test failed: {e}")
 
@@ -204,11 +162,10 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
                 test_results.append((j, i, p_val, f_stat))
                 
             except Exception as e:
-                print(f"Warning: Granger test failed for {i} -> {j}: {e}")
                 p_values.append(1.0)
                 test_results.append((j, i, 1.0, 0.0))
 
-    print(f"\nApplying FDR correction (Benjamini-Hochberg) with alpha={alpha}...")
+    print(f"\nFDR correction (Benjamini-Hochberg) with alpha={alpha}")
     p_values = np.array(p_values)
     rejected, pvals_corrected, _, _ = multipletests(
         p_values, alpha=alpha, method='fdr_bh'
@@ -226,7 +183,7 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
             else:
                 if p_values[idx] < 0.1:
                     print(f"  - Agent {i} -> Agent {j}: p={p_values[idx]:.4f}, "
-                          f"corrected_p={pvals_corrected[idx]:.4f} (not significant)")
+                          f"corrected_p={pvals_corrected[idx]:.4f}")
             idx += 1
     
     print(f"\nInfluence Matrix A (A[j,i] = 1 if i Granger-causes j):")
@@ -236,14 +193,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     return A
 
 def validate_influence_matrix(A_hat, A_true):
-    """
-    Args:
-        A_hat: Estimated influence matrix
-        A_true: Ground truth influence matrix
-    
-    Returns:
-        metrics: Dictionary with precision, recall, F1, accuracy
-    """
     num_agents = A_hat.shape[0]
 
     mask = ~np.eye(num_agents, dtype=bool)
@@ -270,10 +219,7 @@ def validate_influence_matrix(A_hat, A_true):
         'fn': int(fn),
         'tn': int(tn)
     }
-    
-    print(f"\n{'='*60}")
-    print("Validation Metrics (Section 1.2)")
-    print(f"{'='*60}")
+
     print(f"Precision: {precision:.4f}")
     print(f"Recall: {recall:.4f}")
     print(f"F1-Score: {f1:.4f}")
@@ -284,33 +230,16 @@ def validate_influence_matrix(A_hat, A_true):
     return metrics
 
 def test_time_windows(trajectories, max_lag=5, alpha=0.05, window_sizes=None):
-    """
-    Args:
-        trajectories: Full time series data
-        max_lag: Maximum lag for VAR model
-        alpha: Significance level
-        window_sizes: List of window sizes to test (default: [50%, 75%, 100%])
-    
-    Returns:
-        results: Dictionary with results for each window
-    """
     T, num_agents = trajectories.shape
     
     if window_sizes is None:
         window_sizes = [int(T * 0.5), int(T * 0.75), T]
     
-    print(f"\n{'='*60}")
-    print("Testing Robustness Across Time Windows")
-    print(f"{'='*60}")
-    
     results = {}
     
     for window_size in window_sizes:
         if window_size < max_lag * 2:
-            print(f"\nSkipping window size {window_size} (too small for VAR)")
             continue
-        
-        print(f"\nWindow size: {window_size} ({window_size/T*100:.1f}% of data)")
 
         window_data = trajectories[-window_size:]
         
@@ -325,9 +254,7 @@ def test_time_windows(trajectories, max_lag=5, alpha=0.05, window_sizes=None):
             print(f"  Failed: {e}")
             results[window_size] = None
     if len(results) > 1:
-        print(f"\n{'='*60}")
         print("Consistency Check Across Windows")
-        print(f"{'='*60}")
         
         valid_results = {k: v for k, v in results.items() if v is not None}
         if len(valid_results) > 1:
@@ -343,10 +270,7 @@ def test_time_windows(trajectories, max_lag=5, alpha=0.05, window_sizes=None):
     return results
 
 if __name__ == "__main__":
-    import pickle
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Granger Causality Analysis with Diagnostics")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--trajectory-file", type=str, 
                        default="runs/MADDPG_simple_spread_v3_20251221_155847/trajectory_data.pkl",
                        help="Path to trajectory data file")
@@ -393,8 +317,6 @@ if __name__ == "__main__":
     trajectories = np.nan_to_num(trajectories, nan=0.0, posinf=0.0, neginf=0.0)
     
     print(f"\nUsing metric: {args.metric}")
-    print(f"Trajectory shape: {trajectories.shape}")
-
     A_hat = estimate_influence_granger(
         trajectories, 
         max_lag=args.max_lag, 
@@ -414,9 +336,7 @@ if __name__ == "__main__":
     metrics = None
 
     if args.ground_truth:
-        print(f"\n{'='*60}")
         print("Loading Ground Truth")
-        print(f"{'='*60}")
 
         try:
             if args.ground_truth.endswith('.npy'):
@@ -428,7 +348,6 @@ if __name__ == "__main__":
                 A_true = np.load(args.ground_truth)
             
             print(f"Ground truth shape: {A_true.shape}")
-            print("Ground truth matrix:")
             print(A_true)
 
             if A_true.shape != A_hat.shape:
@@ -436,7 +355,7 @@ if __name__ == "__main__":
             else:
                 metrics = validate_influence_matrix(A_hat, A_true)
         except Exception as e:
-            print(f"Error loading ground truth: {e}")
+            print(f"Error loading: {e}")
             A_true = None
 
     if args.save_results:

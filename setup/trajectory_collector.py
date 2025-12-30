@@ -7,12 +7,6 @@ from collections import defaultdict
 
 class TrajectoryCollector:
     def __init__(self, num_agents, save_dir, collect_interval=1000):
-        """
-        Args:
-            num_agents: Number of agents
-            save_dir: Directory to save trajectory data
-            collect_interval: How often to collect data (in training steps)
-        """
         self.num_agents = num_agents
         self.save_dir = save_dir
         self.collect_interval = collect_interval
@@ -26,13 +20,6 @@ class TrajectoryCollector:
         os.makedirs(save_dir, exist_ok=True)
     
     def extract_policy_params(self, actor_network):
-        """
-        Args:
-            actor_network: PyTorch actor network
-            
-        Returns:
-            Flattened parameter vector as numpy array
-        """
         params = []
         for param in actor_network.parameters():
             params.append(param.data.cpu().numpy().flatten())
@@ -61,10 +48,6 @@ class TrajectoryCollector:
                     self.agent_values[agent_idx].append(0.0)
     
     def save(self, filename="trajectory_data.pkl"):
-        """
-        Args:
-            filename: Name of the file to save
-        """
         trajectory_data = {
             'timesteps': np.array(self.timesteps),
             'policy_params': {agent_idx: np.array(params_list) 
@@ -83,16 +66,11 @@ class TrajectoryCollector:
             pickle.dump(trajectory_data, f)
         
         print(f"\nTrajectory data saved to {filepath}")
-        print(f"  - Collected {len(self.timesteps)} snapshots")
         print(f"  - Policy parameters shape: {[v.shape for v in trajectory_data['policy_params'].values()]}")
         print(f"  - Value estimates collected: {len(self.agent_values[0]) if 0 in self.agent_values else 0}")
         print(f"  - Episode rewards collected: {len(self.episode_rewards[0]) if 0 in self.episode_rewards else 0}")
     
     def get_trajectory_summary(self):
-        """
-        Returns:
-            Dictionary with summary statistics
-        """
         summary = {
             'num_snapshots': len(self.timesteps),
             'timestep_range': (min(self.timesteps), max(self.timesteps)) if self.timesteps else (0, 0),

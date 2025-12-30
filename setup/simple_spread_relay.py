@@ -3,11 +3,6 @@ from pettingzoo.mpe import simple_spread_v3
 
 class RelayRaceWrapper:
     def __init__(self, base_env, tag_distance=0.1):
-        """
-        Args:
-            base_env: The base simple_spread_v3 parallel environment
-            tag_distance: Distance threshold for "tagging" (activating next agent)
-        """
         self.base_env = base_env
         self.tag_distance = tag_distance
         self._agents = None
@@ -145,16 +140,6 @@ class RelayRaceWrapper:
 
 
 def make_relay_race_env(max_cycles=25, continuous_actions=True, tag_distance=0.1, render_mode=None):
-    """
-    Args:
-        max_cycles: Maximum number of steps per episode
-        continuous_actions: Whether to use continuous actions
-        tag_distance: Distance threshold for reaching landmark (default: 0.1)
-        render_mode: Render mode (None, 'human', etc.)
-    
-    Returns:
-        Wrapped environment with relay race mechanics
-    """
     base_env = simple_spread_v3.parallel_env(
         max_cycles=max_cycles,
         continuous_actions=continuous_actions,
@@ -166,8 +151,6 @@ def make_relay_race_env(max_cycles=25, continuous_actions=True, tag_distance=0.1
 
 if __name__ == "__main__":
     env = make_relay_race_env(max_cycles=25, tag_distance=0.1)
-    
-    print("Testing Relay Race Environment")
     print(f"Number of agents: {len(env.base_env.agents)}")
     
     observations, infos = env.reset()
@@ -188,5 +171,4 @@ if __name__ == "__main__":
             break
     
     env.close()
-    print("\nTest complete!")
 

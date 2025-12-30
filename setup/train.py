@@ -99,7 +99,6 @@ def train(args):
     print(f"Training {args.algo} on {args.env_name}")
     print(f"Total timesteps: {args.total_timesteps:,}")
     print(f"{'='*60}\n")
-    print("Running initial evaluation...")
     avg_rewards, success_rate = evaluate(env_eval, maddpg, agents, logger, 0)
 
     observations, _ = env.reset()
@@ -160,7 +159,6 @@ def train(args):
     if trajectory_collector is not None:
         trajectory_collector.save("trajectory_data.pkl")
         summary = trajectory_collector.get_trajectory_summary()
-        print(f"\nTrajectory Collection Summary:")
         print(f"  - Total snapshots: {summary['num_snapshots']}")
         print(f"  - Timestep range: {summary['timestep_range']}")
     
