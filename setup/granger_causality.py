@@ -300,7 +300,7 @@ if __name__ == "__main__":
 
     num_agents = data['num_agents']
     trajectories = []
-    
+
     if args.metric == "agent_values":
         for agent_idx in range(num_agents):
             trajectories.append(data['agent_values'][agent_idx])

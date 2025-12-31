@@ -13,6 +13,27 @@ from evaluator import evaluate
 from trajectory_collector import TrajectoryCollector
 
 
+def apply_reward_shaping(rewards_dict, agent_names, env_name):
+    shaped_rewards = rewards_dict.copy()
+    
+    if env_name == 'simple_adversary_v3':
+        for agent_name in agent_names:
+            if 'adversary' in agent_name.lower():
+                if shaped_rewards[agent_name] < -10: 
+                    shaped_rewards[agent_name] *= 1.0 
+                elif shaped_rewards[agent_name] > -5: 
+                    shaped_rewards[agent_name] += 0.5
+                if shaped_rewards[agent_name] > 0:
+                    shaped_rewards[agent_name] += 0.2
+    
+    return shaped_rewards
+
+
+def get_curriculum_difficulty(global_step, total_timesteps, initial_noise=0.5, final_noise=0.1):
+    progress = min(1.0, global_step / (total_timesteps * 0.5))  # Curriculum over first 50% of training
+    noise_multiplier = initial_noise + (final_noise - initial_noise) * progress
+    return noise_multiplier
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MADDPG")
     parser.add_argument("--env-name", type=str, default="simple_spread_v3")
@@ -39,6 +60,18 @@ def parse_args():
                        help="Scale factor for rewards (helps stabilize Q-values)")
     parser.add_argument("--weight-decay", type=float, default=1e-4,
                        help="L2 regularization (weight decay) to prevent large parameters")
+    parser.add_argument("--grad-clip-norm", type=float, default=0.5,
+                       help="Maximum gradient norm for clipping")
+    parser.add_argument("--adversary-actor-lr", type=float, default=None,
+                       help="Learning rate for adversary actor (lower than good agents, e.g., 5e-4)")
+    parser.add_argument("--adversary-critic-lr", type=float, default=None,
+                       help="Learning rate for adversary critic (lower than good agents)")
+    parser.add_argument("--separate-buffers", action="store_true",
+                       help="Use separate replay buffers for adversary and good agents")
+    parser.add_argument("--curriculum-learning", action="store_true",
+                       help="Enable curriculum learning (progressive difficulty)")
+    parser.add_argument("--reward-shaping", action="store_true",
+                       help="Enable reward shaping for better learning signal")
     
     return parser.parse_args()
 
@@ -57,6 +90,29 @@ def train(args):
 
     hidden_sizes = tuple(map(int, args.hidden_sizes.split(',')))
     
+    # Identify adversary agents (for simple_adversary_v3)
+    agent_types = []
+    adversary_indices = []
+    for i, agent_name in enumerate(agents):
+        if 'adversary' in agent_name.lower():
+            agent_types.append('adversary')
+            adversary_indices.append(i)
+        else:
+            agent_types.append('agent')
+
+    actor_lrs = [args.actor_lr] * num_agents
+    critic_lrs = [args.critic_lr] * num_agents
+    
+    if args.adversary_actor_lr is not None or args.adversary_critic_lr is not None:
+        for idx in adversary_indices:
+            if args.adversary_actor_lr is not None:
+                actor_lrs[idx] = args.adversary_actor_lr
+            if args.adversary_critic_lr is not None:
+                critic_lrs[idx] = args.adversary_critic_lr
+        print(f"\nPer-agent learning rates:")
+        for i, agent_name in enumerate(agents):
+            print(f"  {agent_name}: actor_lr={actor_lrs[i]:.6f}, critic_lr={critic_lrs[i]:.6f}")
+    
     maddpg = MADDPG(
         state_sizes=state_sizes,
         action_sizes=action_sizes,
@@ -68,15 +124,43 @@ def train(args):
         action_low=action_low,
         action_high=action_high,
         reward_scale=args.reward_scale,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        actor_lrs=actor_lrs,
+        critic_lrs=critic_lrs,
+        grad_clip_norm=args.grad_clip_norm,
+        agent_types=agent_types
     )
-    buffer = ReplayBuffer(
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
-        num_agents=num_agents,
-        state_sizes= state_sizes,
-        action_sizes=action_sizes
-    )
+    # Create replay buffers (separate for adversary if requested)
+    if args.separate_buffers and len(adversary_indices) > 0:
+        print(f"\nUsing separate replay buffers:")
+        buffer_adversary = ReplayBuffer(
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            num_agents=len(adversary_indices),
+            state_sizes=[state_sizes[i] for i in adversary_indices],
+            action_sizes=[action_sizes[i] for i in adversary_indices]
+        )
+        good_agent_indices = [i for i in range(num_agents) if i not in adversary_indices]
+        buffer_good = ReplayBuffer(
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            num_agents=len(good_agent_indices),
+            state_sizes=[state_sizes[i] for i in good_agent_indices],
+            action_sizes=[action_sizes[i] for i in good_agent_indices]
+        )
+        print(f"  Adversary buffer: {len(adversary_indices)} agents")
+        print(f"  Good agents buffer: {len(good_agent_indices)} agents")
+        buffer = None  # Will use separate buffers
+    else:
+        buffer = ReplayBuffer(
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            num_agents=num_agents,
+            state_sizes=state_sizes,
+            action_sizes=action_sizes
+        )
+        buffer_adversary = None
+        buffer_good = None
     save_dir = os.path.join("runs", experiment_name)
     os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, "model.pt")
@@ -90,11 +174,20 @@ def train(args):
             collect_interval=args.trajectory_interval
         )
         print(f"Trajectory collection enabled (interval: {args.trajectory_interval} steps)")
+
+    # Curriculum learning: adjust noise scale over time
+    if args.curriculum_learning:
+        initial_noise = args.noise_scale
+        final_noise = args.min_noise
+        print(f"\nCurriculum learning enabled: noise will decrease from {initial_noise} to {final_noise}")
+    else:
+        initial_noise = args.noise_scale
+        final_noise = args.noise_scale
     
     noise_scale = args.noise_scale
     best_score = -float('inf')
     episode_rewards = np.zeros(num_agents)
-    
+
     print(f"\n{'='*60}")
     print(f"Training {args.algo} on {args.env_name}")
     print(f"Total timesteps: {args.total_timesteps:,}")
@@ -104,6 +197,12 @@ def train(args):
     observations, _ = env.reset()
     
     for global_step in tqdm(range(1, args.total_timesteps + 1), desc="Training"):
+        # Curriculum learning: adjust noise scale
+        if args.curriculum_learning:
+            noise_scale = get_curriculum_difficulty(global_step, args.total_timesteps, 
+                                                    initial_noise, final_noise)
+            noise_scale = max(noise_scale, args.min_noise)  # Don't go below min_noise
+        
         states = [np.array(observations[agent], dtype=np.float32) for agent in agents]
         actions = maddpg.act(states, noise_scale=noise_scale)
         actions_dict = {agent: action for agent, action in zip(agents, actions)}
@@ -111,11 +210,34 @@ def train(args):
         dones = [terminations[agent] or truncations[agent] for agent in agents]
         done = any(dones)
 
+        # Apply reward shaping if enabled
+        if args.reward_shaping:
+            rewards = apply_reward_shaping(rewards, agents, args.env_name)
+        
         rewards_array = np.array([rewards[agent] for agent in agents], dtype=np.float32)
         next_states = [np.array(next_observations[agent], dtype=np.float32) for agent in agents]
         dones_array = np.array([terminations[agent] for agent in agents], dtype=np.uint8)
 
-        buffer.add(states, actions, rewards_array, next_states, dones_array)
+        # Add to buffers (separate or shared)
+        if args.separate_buffers and buffer_adversary is not None:
+            # Split states, actions, rewards for separate buffers
+            adv_states = [states[i] for i in adversary_indices]
+            adv_actions = [actions[i] for i in adversary_indices]
+            adv_rewards = rewards_array[adversary_indices]
+            adv_next_states = [next_states[i] for i in adversary_indices]
+            adv_dones = dones_array[adversary_indices]
+            
+            good_indices = [i for i in range(num_agents) if i not in adversary_indices]
+            good_states = [states[i] for i in good_indices]
+            good_actions = [actions[i] for i in good_indices]
+            good_rewards = rewards_array[good_indices]
+            good_next_states = [next_states[i] for i in good_indices]
+            good_dones = dones_array[good_indices]
+            
+            buffer_adversary.add(adv_states, adv_actions, adv_rewards, adv_next_states, adv_dones)
+            buffer_good.add(good_states, good_actions, good_rewards, good_next_states, good_dones)
+        else:
+            buffer.add(states, actions, rewards_array, next_states, dones_array)
         observations = next_observations
         episode_rewards += rewards_array
 
@@ -141,7 +263,6 @@ def train(args):
                 logger.log_scalar(f'{agent}/episode_reward', episode_rewards[i], global_step)
             logger.log_scalar('train/total_reward', np.sum(episode_rewards), global_step)
             logger.log_scalar('train/noise_scale', noise_scale, global_step)
-            
             observations, _ = env.reset()
             episode_rewards = np.zeros(num_agents)
         if global_step % args.eval_interval == 0 or global_step == args.total_timesteps:
@@ -161,7 +282,7 @@ def train(args):
         summary = trajectory_collector.get_trajectory_summary()
         print(f"  - Total snapshots: {summary['num_snapshots']}")
         print(f"  - Timestep range: {summary['timestep_range']}")
-    
+
     env.close()
     env_eval.close()
     logger.close()
