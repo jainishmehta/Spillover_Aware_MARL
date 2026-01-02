@@ -143,7 +143,7 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     except Exception as e:
         print(f"  - Ljung-Box test failed: {e}")
 
-    print(f"\nTesting {num_agents * (num_agents - 1)} pairs for Granger causality...")
+    print(f"\nTesting {num_agents * (num_agents - 1)} pairs for Granger causality")
     
     p_values = []
     test_results = []

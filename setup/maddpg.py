@@ -94,12 +94,16 @@ class MADDPG:
         self.target_critics = []
         self.actor_optimizers = []
         self.critic_optimizers = []
-
+        
         # Use per-agent learning rates if provided, otherwise use default
         if actor_lrs is None:
             actor_lrs = [actor_lr] * self.num_agents
         if critic_lrs is None:
             critic_lrs = [critic_lr] * self.num_agents
+        
+        # Store base learning rates for reference
+        self.base_actor_lrs = actor_lrs.copy()
+        self.base_critic_lrs = critic_lrs.copy()
         
         for i in range(self.num_agents):
             actor = Actor(state_sizes[i], action_sizes[i], hidden_sizes)
@@ -244,7 +248,6 @@ class MADDPG:
             batch_size = 1
             states_tensors = []
 
-            # Convert states to tensors and ensure batch dimension
             for i, state in enumerate(states):
                 state_tensor = torch.FloatTensor(state)
                 if len(state_tensor.shape) == 1:
@@ -252,7 +255,6 @@ class MADDPG:
                     batch_size = state_tensor.shape[0]
                 states_tensors.append(state_tensor)
 
-            # For actors: use original state sizes (no padding needed)
             actions = []
             for i in range(self.num_agents):
                 action = self.actors[i](states_tensors[i])
@@ -266,3 +268,26 @@ class MADDPG:
                 q_value = self.critics[agent_idx](states_flat, actions_flat)
                 q_values.append(q_value.cpu().numpy().flatten())
             return q_values
+    
+    def update_learning_rates(self, multiplier):
+        for i in range(self.num_agents):
+            for param_group in self.actor_optimizers[i].param_groups:
+                param_group['lr'] *= multiplier
+            for param_group in self.critic_optimizers[i].param_groups:
+                param_group['lr'] *= multiplier
+    
+    def set_learning_rates(self, actor_lrs=None, critic_lrs=None):
+        if actor_lrs is not None:
+            for i in range(min(len(actor_lrs), self.num_agents)):
+                for param_group in self.actor_optimizers[i].param_groups:
+                    param_group['lr'] = actor_lrs[i]
+        if critic_lrs is not None:
+            for i in range(min(len(critic_lrs), self.num_agents)):
+                for param_group in self.critic_optimizers[i].param_groups:
+                    param_group['lr'] = critic_lrs[i]
+    
+    def get_learning_rates(self):
+        """Get current learning rates for all agents."""
+        actor_lrs = [opt.param_groups[0]['lr'] for opt in self.actor_optimizers]
+        critic_lrs = [opt.param_groups[0]['lr'] for opt in self.critic_optimizers]
+        return actor_lrs, critic_lrs

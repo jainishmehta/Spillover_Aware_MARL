@@ -13,8 +13,22 @@ from evaluator import evaluate
 from trajectory_collector import TrajectoryCollector
 
 
-def apply_reward_shaping(rewards_dict, agent_names, env_name):
+def apply_reward_shaping(rewards_dict, agent_names, env_name, global_step=None, total_timesteps=None):
+    """
+    Apply reward shaping with coordination rewards during mid-training (Window 3 period).
+    Window 3 typically occurs around 30-60% of training where TSS peaks.
+    """
     shaped_rewards = rewards_dict.copy()
+    
+    # Define coordination window (mid-training phase where TSS peaks)
+    # Window 3: approximately 30-60% of training
+    coordination_window_start = 0.3
+    coordination_window_end = 0.7  # Extended to maintain coupling longer
+    
+    in_coordination_window = False
+    if global_step is not None and total_timesteps is not None:
+        progress = global_step / total_timesteps
+        in_coordination_window = coordination_window_start <= progress <= coordination_window_end
     
     if env_name == 'simple_adversary_v3':
         for agent_name in agent_names:
@@ -23,16 +37,63 @@ def apply_reward_shaping(rewards_dict, agent_names, env_name):
                     shaped_rewards[agent_name] *= 1.0 
                 elif shaped_rewards[agent_name] > -5: 
                     shaped_rewards[agent_name] += 0.5
+            else:
+                # Good agents: add coordination rewards during Window 3
+                if in_coordination_window:
+                    # Reward coordination: if multiple agents succeed together
+                    if shaped_rewards[agent_name] > 0:
+                        shaped_rewards[agent_name] += 0.3  # Coordination bonus
+                # Standard reward shaping
                 if shaped_rewards[agent_name] > 0:
                     shaped_rewards[agent_name] += 0.2
     
     return shaped_rewards
 
 
-def get_curriculum_difficulty(global_step, total_timesteps, initial_noise=0.5, final_noise=0.1):
-    progress = min(1.0, global_step / (total_timesteps * 0.5))  # Curriculum over first 50% of training
-    noise_multiplier = initial_noise + (final_noise - initial_noise) * progress
-    return noise_multiplier
+def get_curriculum_difficulty(global_step, total_timesteps, initial_noise=0.5, final_noise=0.15, 
+                            maintain_coupling=True):
+    """
+    Curriculum learning that maintains coupling instead of returning to independence.
+    
+    Phase 1 (0-30%): Independent exploration (high noise)
+    Phase 2 (30-70%): Coordination window - maintain moderate noise (Window 3 extended)
+    Phase 3 (70-100%): Maintain coupling with persistent exploration (don't decay to zero)
+    """
+    progress = global_step / total_timesteps
+    
+    if maintain_coupling:
+        # Extended curriculum that maintains coupling
+        if progress < 0.3:
+            # Phase 1: Initial exploration
+            phase_progress = progress / 0.3
+            noise = initial_noise + (0.25 - initial_noise) * phase_progress
+        elif progress < 0.7:
+            # Phase 2: Coordination window (extended) - maintain moderate exploration
+            # Keep noise around 0.2-0.25 to maintain coordination
+            noise = 0.2 + (0.15 - 0.2) * ((progress - 0.3) / 0.4)
+        else:
+            # Phase 3: Maintain coupling with persistent exploration
+            phase_progress = (progress - 0.7) / 0.3
+            noise = 0.15 + (final_noise - 0.15) * phase_progress
+    else:
+        # Original curriculum
+        progress = min(1.0, global_step / (total_timesteps * 0.5))
+        noise = initial_noise + (final_noise - initial_noise) * progress
+    
+    return noise
+
+
+def get_learning_rate_multiplier(global_step, total_timesteps, lr_decay_threshold=10000, 
+                                 lr_decay_factor=0.5):
+    """
+    Slow down learning after initial exploration phase to maintain coordination.
+    """
+    if global_step > lr_decay_threshold:
+        # Gradually reduce learning rate after initial exploration
+        decay_progress = min(1.0, (global_step - lr_decay_threshold) / (total_timesteps * 0.3))
+        multiplier = 1.0 - (1.0 - lr_decay_factor) * decay_progress
+        return max(multiplier, lr_decay_factor)  # Don't go below lr_decay_factor
+    return 1.0
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MADDPG")
@@ -72,6 +133,14 @@ def parse_args():
                        help="Enable curriculum learning (progressive difficulty)")
     parser.add_argument("--reward-shaping", action="store_true",
                        help="Enable reward shaping for better learning signal")
+    parser.add_argument("--maintain-coupling", action="store_true", default=True,
+                       help="Maintain coupling in curriculum (don't return to independence)")
+    parser.add_argument("--lr-decay-threshold", type=int, default=10000,
+                       help="Step threshold after which to slow down learning rate")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.5,
+                       help="Factor to multiply learning rate after threshold (e.g., 0.5 = half)")
+    parser.add_argument("--persistent-exploration", action="store_true", default=True,
+                       help="Maintain minimum exploration noise (don't decay to zero)")
     
     return parser.parse_args()
 
@@ -178,11 +247,20 @@ def train(args):
     # Curriculum learning: adjust noise scale over time
     if args.curriculum_learning:
         initial_noise = args.noise_scale
-        final_noise = args.min_noise
-        print(f"\nCurriculum learning enabled: noise will decrease from {initial_noise} to {final_noise}")
+        final_noise = args.min_noise if not args.persistent_exploration else max(args.min_noise, 0.15)
+        maintain_coupling = args.maintain_coupling
+        print(f"\nCurriculum learning enabled:")
+        print(f"  Noise: {initial_noise} → {final_noise}")
+        print(f"  Maintain coupling: {maintain_coupling}")
+        print(f"  Persistent exploration: {args.persistent_exploration}")
     else:
         initial_noise = args.noise_scale
         final_noise = args.noise_scale
+        maintain_coupling = False
+    
+    # Learning rate decay tracking
+    last_lr_check_step = 0
+    lr_update_interval = 5000  # Check and update LR every N steps
     
     noise_scale = args.noise_scale
     best_score = -float('inf')
@@ -200,8 +278,28 @@ def train(args):
         # Curriculum learning: adjust noise scale
         if args.curriculum_learning:
             noise_scale = get_curriculum_difficulty(global_step, args.total_timesteps, 
-                                                    initial_noise, final_noise)
-            noise_scale = max(noise_scale, args.min_noise)  # Don't go below min_noise
+                                                    initial_noise, final_noise, maintain_coupling)
+            # Persistent exploration: don't go below minimum
+            min_noise_threshold = args.min_noise if not args.persistent_exploration else max(args.min_noise, 0.15)
+            noise_scale = max(noise_scale, min_noise_threshold)
+        
+        # Learning rate decay after initial exploration (gradual decay)
+        if global_step > args.lr_decay_threshold and (global_step - last_lr_check_step) >= lr_update_interval:
+            current_multiplier = get_learning_rate_multiplier(global_step, args.total_timesteps,
+                                                             args.lr_decay_threshold, args.lr_decay_factor)
+            
+            # Compute target LRs based on multiplier from base rates
+            target_actor_lrs = [lr * current_multiplier for lr in actor_lrs]
+            target_critic_lrs = [lr * current_multiplier for lr in critic_lrs]
+            
+            # Set learning rates directly (avoids repeated multiplication)
+            maddpg.set_learning_rates(target_actor_lrs, target_critic_lrs)
+            
+            if global_step % (lr_update_interval * 2) == 0:  # Print every 2 updates
+                print(f"\n[Step {global_step}] Learning rate decay (multiplier: {current_multiplier:.3f})")
+                print(f"  Actor LRs: {[f'{lr:.6f}' for lr in target_actor_lrs]}")
+                print(f"  Critic LRs: {[f'{lr:.6f}' for lr in target_critic_lrs]}")
+            last_lr_check_step = global_step
         
         states = [np.array(observations[agent], dtype=np.float32) for agent in agents]
         actions = maddpg.act(states, noise_scale=noise_scale)
@@ -210,9 +308,9 @@ def train(args):
         dones = [terminations[agent] or truncations[agent] for agent in agents]
         done = any(dones)
 
-        # Apply reward shaping if enabled
+        # Apply reward shaping if enabled (with coordination rewards during Window 3)
         if args.reward_shaping:
-            rewards = apply_reward_shaping(rewards, agents, args.env_name)
+            rewards = apply_reward_shaping(rewards, agents, args.env_name, global_step, args.total_timesteps)
         
         rewards_array = np.array([rewards[agent] for agent in agents], dtype=np.float32)
         next_states = [np.array(next_observations[agent], dtype=np.float32) for agent in agents]
