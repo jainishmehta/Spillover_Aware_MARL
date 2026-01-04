@@ -104,19 +104,89 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     
     min_required = max_lag * num_agents * 2 
     if T < min_required:
-        print(f"\nWarning: Only {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
+        print(f"\nOnly {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
 
     min_required = max_lag * num_agents * 2
     if T < min_required:
-        print(f"Warning: Only {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
+        print(f"Only {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
+
+    # Check for constant or near-constant variables (can cause positive definiteness issues)
+    for i in range(num_agents):
+        var_i = np.var(trajectories[:, i])
+        if var_i < 1e-10:
+            print(f"Warning: Variable {i} has near-zero variance ({var_i:.2e}). This may cause numerical issues.")
+            # Add small noise to break perfect collinearity
+            trajectories[:, i] += np.random.normal(0, 1e-8, T)
+    
+    # Check for perfect multicollinearity
+    if num_agents > 1:
+        corr_matrix = np.corrcoef(trajectories.T)
+        for i in range(num_agents):
+            for j in range(i+1, num_agents):
+                if abs(corr_matrix[i, j]) > 0.99:
+                    print(f"Warning: Variables {i} and {j} are highly correlated ({corr_matrix[i, j]:.4f}).")
 
     model = VAR(trajectories)
 
-    lag_order = model.select_order(maxlags=max_lag)
-    optimal_lag = lag_order.selected_orders.get('aic', max_lag)
-    optimal_lag = min(optimal_lag, max_lag)
+    # Try to select optimal lag order, but handle positive definiteness errors
+    try:
+        lag_order = model.select_order(maxlags=max_lag)
+        optimal_lag = lag_order.selected_orders.get('aic', max_lag)
+        optimal_lag = min(optimal_lag, max_lag)
+    except np.linalg.LinAlgError as e:
+        print(f"Warning: Could not select optimal lag order due to numerical issues: {e}")
+        print("This often happens when:")
+        print("  - Data has multicollinearity (highly correlated variables)")
+        print("  - Insufficient observations relative to number of variables")
+        print("  - Near-constant variables")
+        print(f"Using fixed lag order: {max_lag}")
+        optimal_lag = max_lag
+    except Exception as e:
+        print(f"Warning: Error during lag selection: {e}")
+        print(f"Using fixed lag order: {max_lag}")
+        optimal_lag = max_lag
+    
+    # Ensure we have enough observations for the chosen lag
+    if T <= optimal_lag:
+        print(f"Error: Not enough observations ({T}) for lag {optimal_lag}. Need at least {optimal_lag + 1}.")
+        print("Reducing lag order to fit available data.")
+        optimal_lag = max(1, T - 1)
 
-    fitted_model = model.fit(optimal_lag)
+    # Try to fit the model with error handling
+    try:
+        fitted_model = model.fit(optimal_lag)
+    except np.linalg.LinAlgError as e:
+        print(f"Error fitting VAR model: {e}")
+        print("This may be due to:")
+        print("  - Singular or near-singular covariance matrix")
+        print("  - Perfect multicollinearity in the data")
+        print("  - Insufficient observations")
+        print("\nAttempting to fix by reducing lag order...")
+        
+        # Try with reduced lag
+        fitted_successfully = False
+        for reduced_lag in range(optimal_lag - 1, 0, -1):
+            if T > reduced_lag:
+                try:
+                    print(f"  Trying lag {reduced_lag}...")
+                    fitted_model = model.fit(reduced_lag)
+                    optimal_lag = reduced_lag
+                    print(f"  Successfully fitted with lag {reduced_lag}")
+                    fitted_successfully = True
+                    break
+                except (np.linalg.LinAlgError, ValueError):
+                    continue
+        
+        # If still failing, raise error with helpful message
+        if not fitted_successfully:
+            raise RuntimeError(
+                "Could not fit VAR model even with reduced lag order. "
+                "Possible causes:\n"
+                "  1. Data has perfect multicollinearity (check for constant/near-constant variables)\n"
+                "  2. Insufficient observations (need at least lag * num_agents * 2)\n"
+                "  3. Numerical precision issues\n"
+                f"  Current: {T} observations, {num_agents} agents, trying lag {optimal_lag}"
+            )
 
     print("VAR Model Diagnostics")
     print(f"  - AIC: {fitted_model.aic:.4f}")

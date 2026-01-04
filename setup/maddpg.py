@@ -94,8 +94,7 @@ class MADDPG:
         self.target_critics = []
         self.actor_optimizers = []
         self.critic_optimizers = []
-        
-        # Use per-agent learning rates if provided, otherwise use default
+
         if actor_lrs is None:
             actor_lrs = [actor_lr] * self.num_agents
         if critic_lrs is None:
@@ -156,18 +155,15 @@ class MADDPG:
         next_states = torch.FloatTensor(next_states)
         dones = torch.FloatTensor(dones)
 
-        # Extract only the relevant portion for each agent's state (replay buffer pads to max_state_size)
         states_for_actors = []
         next_states_for_actors = []
         for i in range(self.num_agents):
             states_for_actors.append(states[:, i, :self.state_sizes[i]])
             next_states_for_actors.append(next_states[:, i, :self.state_sizes[i]])
-        
-        # Concatenate states for critic (matching sum(state_sizes))
+
         states_flat = torch.cat(states_for_actors, dim=1)
         next_states_flat = torch.cat(next_states_for_actors, dim=1)
-        
-        # Actions are already padded in replay buffer, extract relevant portions
+
         actions_for_actors = []
         for i in range(self.num_agents):
             actions_for_actors.append(actions[:, i, :self.action_sizes[i]])
@@ -182,6 +178,7 @@ class MADDPG:
 
             q_next = self.target_critics[agent_idx](next_states_flat, next_actions_flat)
             scaled_rewards = rewards[:, agent_idx:agent_idx+1] * self.reward_scale
+            # Bellman equation for Q-learning
             q_target = scaled_rewards + self.gamma * (1 - dones[:, agent_idx:agent_idx+1]) * q_next
             q_target = torch.clamp(q_target, -100.0, 100.0)
 
@@ -287,7 +284,6 @@ class MADDPG:
                     param_group['lr'] = critic_lrs[i]
     
     def get_learning_rates(self):
-        """Get current learning rates for all agents."""
         actor_lrs = [opt.param_groups[0]['lr'] for opt in self.actor_optimizers]
         critic_lrs = [opt.param_groups[0]['lr'] for opt in self.critic_optimizers]
         return actor_lrs, critic_lrs

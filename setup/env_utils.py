@@ -5,7 +5,7 @@ from simple_spread_relay import make_relay_race_env
 
 ENV_MAP = {
     'simple_spread_v3': simple_spread_v3,
-    'simple_spread_relay': 'relay_race',  # Special marker for relay race variant
+    'simple_spread_relay': 'relay_race',
     'simple_tag_v3': simple_tag_v3,
     'simple_adversary_v3': simple_adversary_v3,
 }
@@ -14,8 +14,7 @@ ENV_MAP = {
 def create_env(env_name, max_steps=25, tag_distance=0.1):
     if env_name not in ENV_MAP:
         raise ValueError(f"Unknown environment: {env_name}")
-    
-    #relay race variant
+
     if env_name == 'simple_spread_relay':
         env = make_relay_race_env(
             max_cycles=max_steps,
