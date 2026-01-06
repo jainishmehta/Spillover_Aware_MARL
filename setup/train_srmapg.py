@@ -191,7 +191,7 @@ def train(args):
             print(f"  Influence update alpha: {args.influence_update_alpha} (EMA coefficient)")
     print(f"{'='*60}\n")
     print("Running initial evaluation")
-    avg_rewards, success_rate = evaluate(env_eval, srmapg, agents, logger, 0)
+    avg_rewards, success_rate = evaluate(env_eval, srmapg, agents, logger, 0, env_name=args.env_name)
 
     observations, _ = env.reset()
     
@@ -251,7 +251,7 @@ def train(args):
         if global_step % args.eval_interval == 0 or global_step == args.total_timesteps:
             srmapg.save(model_path)
             
-            avg_rewards, success_rate = evaluate(env_eval, srmapg, agents, logger, global_step)
+            avg_rewards, success_rate = evaluate(env_eval, srmapg, agents, logger, global_step, env_name=args.env_name)
             score = np.sum(avg_rewards)
             
             if score > best_score:

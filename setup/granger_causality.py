@@ -110,15 +110,12 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.05, check_statio
     if T < min_required:
         print(f"Only {T} observations. Recommended: at least {min_required} for reliable VAR({max_lag})")
 
-    # Check for constant or near-constant variables (can cause positive definiteness issues)
     for i in range(num_agents):
         var_i = np.var(trajectories[:, i])
         if var_i < 1e-10:
             print(f"Warning: Variable {i} has near-zero variance ({var_i:.2e}). This may cause numerical issues.")
-            # Add small noise to break perfect collinearity
             trajectories[:, i] += np.random.normal(0, 1e-8, T)
-    
-    # Check for perfect multicollinearity
+
     if num_agents > 1:
         corr_matrix = np.corrcoef(trajectories.T)
         for i in range(num_agents):

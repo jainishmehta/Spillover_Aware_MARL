@@ -36,7 +36,6 @@ def apply_reward_shaping(rewards_dict, agent_names, env_name, global_step=None, 
                         shaped_rewards[agent_name] += 0.3
                 if shaped_rewards[agent_name] > 0:
                     shaped_rewards[agent_name] += 0.2
-    
     return shaped_rewards
 
 

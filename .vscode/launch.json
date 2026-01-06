@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Spillover Analysis",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/setup/spillover_analysis.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--trajectory-file", "${workspaceFolder}/runs/MADDPG_simple_adversary_v3_somewhat_accurate/trajectory_data.pkl",
+                "--metric","policy_params",
+                "--num-temporal-windows", "4",
+                "--test-window-sizes",
+                "--alpha", "0.1",
+                "--k-hops", "3",
+                "--temporal-analysis"
+            ],
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

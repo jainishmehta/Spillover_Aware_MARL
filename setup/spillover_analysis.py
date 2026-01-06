@@ -17,6 +17,167 @@ def load_trajectory_data(filepath):
     with open(filepath, 'rb') as f:
         data = pickle.load(f)
     return data
+
+
+class MARLImpulseResponse:
+    def __init__(self, var_model, agent_names=None):
+        """
+        Parameters:
+        -----------
+        var_model : fitted VAR model from statsmodels
+        agent_names : list of agent identifiers
+        """
+        self.model = var_model
+        self.n_agents = var_model.k_vars  # number of variables/agents (k_ar is number of lags!)
+        self.agent_names = agent_names or [f"Agent_{i}" for i in range(self.n_agents)]
+        
+    def compute_irf(self, periods=20, impulse_agent=None, response_agent=None):
+        """
+        periods : int, number of periods ahead to compute
+        impulse_agent : int or None, which agent receives shock (None = all)
+        response_agent : int or None, which agent's response to track (None = all)
+        
+        Returns:
+        --------
+        irf : array of shape (periods, n_agents, n_agents)
+              irf[t, i, j] = response of agent j at time t to shock in agent i at t=0
+        """
+        # Compute IRF using orthogonalized innovations (Cholesky decomposition)
+        irf_result = self.model.irf(periods)
+        
+        # If you want non-orthogonalized IRFs, use:
+        # irf_result = self.model.irf(periods, orth=False)
+        
+        return irf_result
+    
+    def plot_irf_single(self, impulse_agent, response_agent, periods=20, 
+                       confidence_level=0.95, figsize=(10, 6)):
+        irf = self.model.irf(periods)
+        
+        plt.figure(figsize=figsize)
+        
+        # Get IRF values
+        irf_values = irf.irfs[:, response_agent, impulse_agent]
+        
+        # Get confidence intervals if available
+        if hasattr(irf, 'cum_effect_cov'):
+            # Compute standard errors (approximation)
+            irf_stderr = irf.stderr()[:, response_agent, impulse_agent]
+            
+            # Critical value for confidence interval
+            from scipy import stats
+            z_crit = stats.norm.ppf((1 + confidence_level) / 2)
+            
+            lower = irf_values - z_crit * irf_stderr
+            upper = irf_values + z_crit * irf_stderr
+            
+            plt.fill_between(range(periods), lower, upper, alpha=0.2, 
+                           label=f'{int(confidence_level*100)}% CI')
+        
+        plt.plot(irf_values, linewidth=2, label='IRF')
+        plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        plt.xlabel('Periods Ahead')
+        plt.ylabel('Response')
+        plt.title(f'Response of {self.agent_names[response_agent]} to '
+                 f'Shock in {self.agent_names[impulse_agent]}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        return plt.gcf()
+    
+    def plot_irf_matrix(self, periods=20, figsize=(15, 12)):
+        """
+        Plot matrix of all pairwise IRFs
+        """
+        irf = self.model.irf(periods)
+        print(f"IRF: {irf}")
+        print(f"N agents: {self.n_agents}")
+        fig, axes = plt.subplots(self.n_agents, self.n_agents, 
+                                figsize=figsize, sharex=True, sharey=False)
+        print(f"Axes: {axes}")
+        for i in range(self.n_agents):
+            for j in range(self.n_agents):
+                ax = axes[j, i] if self.n_agents > 1 else axes
+                
+                # Plot IRF
+                irf_values = irf.irfs[:, j, i]
+                ax.plot(irf_values, linewidth=1.5)
+                ax.axhline(y=0, color='k', linestyle='--', alpha=0.3, linewidth=0.5)
+                ax.grid(True, alpha=0.2)
+                
+                # Labels
+                if j == self.n_agents - 1:
+                    ax.set_xlabel(f'Shock: {self.agent_names[i]}', fontsize=9)
+                if i == 0:
+                    ax.set_ylabel(f'Response: {self.agent_names[j]}', fontsize=9)
+                    
+        plt.suptitle('Impulse Response Functions: Agent Interactions', 
+                    fontsize=14, y=0.995)
+        plt.tight_layout()
+        
+        return fig
+    
+    def plot_cumulative_effects(self, periods=20, figsize=(12, 8)):
+        """
+        Plot cumulative effects of shocks
+        """
+        irf = self.model.irf(periods)
+        cumulative = np.cumsum(irf.irfs, axis=0)
+        
+        fig, axes = plt.subplots(self.n_agents, self.n_agents, 
+                                figsize=figsize, sharex=True)
+        
+        for i in range(self.n_agents):
+            for j in range(self.n_agents):
+                ax = axes[j, i] if self.n_agents > 1 else axes
+                ax.plot(cumulative[:, j, i])
+                ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+                ax.set_title(f'{self.agent_names[i]} → {self.agent_names[j]}', 
+                           fontsize=9)
+                ax.grid(True, alpha=0.2)
+                
+        plt.suptitle('Cumulative Impulse Response Functions', fontsize=14)
+        plt.tight_layout()
+        
+        return fig
+    
+    def get_peak_response_times(self, periods=20):
+        """
+        Find when each agent's response peaks for each impulse
+        """
+        irf = self.model.irf(periods)
+        peak_times = np.zeros((self.n_agents, self.n_agents))
+        peak_values = np.zeros((self.n_agents, self.n_agents))
+        
+        for i in range(self.n_agents):
+            for j in range(self.n_agents):
+                irf_values = irf.irfs[:, j, i]
+                peak_idx = np.argmax(np.abs(irf_values))
+                peak_times[j, i] = peak_idx
+                peak_values[j, i] = irf_values[peak_idx]
+                
+        return peak_times, peak_values
+    
+    def plot_heatmap_max_effects(self, periods=20, figsize=(10, 8)):
+        """
+        Heatmap showing maximum absolute effect of agent i on agent j
+        """
+        _, peak_values = self.get_peak_response_times(periods)
+        
+        plt.figure(figsize=figsize)
+        sns.heatmap(peak_values, annot=True, fmt='.3f', cmap='RdBu_r',
+                   center=0, xticklabels=self.agent_names, 
+                   yticklabels=self.agent_names,
+                   cbar_kws={'label': 'Peak Response'})
+        plt.xlabel('Impulse Agent')
+        plt.ylabel('Response Agent')
+        plt.title('Maximum Response: Agent i → Agent j')
+        plt.tight_layout()
+        
+        return plt.gcf()
+
+
 def prepare_trajectories(data, metric='agent_values', max_lag=5):
     num_agents = data['num_agents']
     
@@ -144,6 +305,8 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.1, method='fdr_b
     A = np.zeros((num_agents, num_agents), dtype=int)
     p_values = np.ones((num_agents, num_agents))
     test_statistics = np.zeros((num_agents, num_agents))
+    effect_sizes = np.zeros((num_agents, num_agents))  # Magnitude of influence
+    normalized_effects = np.zeros((num_agents, num_agents))  # Effect size / total impact on j
     
     if not quiet:
         print(f"Data shape: {trajectories.shape}")
@@ -194,7 +357,6 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.1, method='fdr_b
             print(f"Optimal lag selected: {optimal_lag}")
         
         fitted_model = model.fit(optimal_lag)
-        
         if not quiet:
             print(f"  - AIC: {fitted_model.aic:.4f}")
             print(f"  - BIC: {fitted_model.bic:.4f}")
@@ -242,24 +404,7 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.1, method='fdr_b
                     print(f"Warning: Granger test failed for {i} -> {j}: {e}")
                 p_values[j, i] = 1.0
                 test_statistics[j, i] = 0.0
-    if len(all_p_values) == 0:
-        if not quiet:
-            print(f"Influence matrix will be all zeros")
-        return A, p_values, test_statistics
-    if not quiet:
-        print(f"\nRaw p-values (before FDR correction):")
-        idx = 0
-        for j in range(num_agents):
-            for i in range(num_agents):
-                if i != j:
-                    print(f"  Agent {i} -> Agent {j}: p={all_p_values[idx]:.6f}")
-                    idx += 1
-        
-        print(f"\nFDR correction ({method})")
-    all_p_values = np.array(all_p_values)
-    if len(all_p_values) == 0 or np.all(np.isnan(all_p_values)):
-        return A, p_values, test_statistics
-    
+    #Try using impulse respones to plot IRF matrix
     rejected, pvals_corrected, _, _ = multipletests(
         all_p_values, alpha=alpha, method=method
     )
@@ -273,17 +418,42 @@ def estimate_influence_granger(trajectories, max_lag=5, alpha=0.1, method='fdr_b
             if rejected[corrected_idx]:
                 A[j, i] = 1
                 if not quiet:
-                    print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f}")
-            
+                    effect_str = f", effect={effect_sizes[j,i]:.4f}, normalized={normalized_effects[j,i]:.4f}"
+                    print(f"  Agent {i} -> Agent {j}: p={p_values[j,i]:.4f}, corrected_p={pvals_corrected[corrected_idx]:.4f}{effect_str}")
             corrected_idx += 1
     
     if not quiet:
-        print(f"Influence Matrix (A[j,i] = 1 if i Granger-causes j):")
+        print(f"\nInfluence Matrix (A[j,i] = 1 if i Granger-causes j):")
         print(A)
         print(f"\nTotal causal relationships found: {np.sum(A)}")
+        
+        # Print effect sizes for significant relationships
+        if np.sum(A) > 0:
+            print(f"\nEffect Sizes (coefficient sum) for significant relationships:")
+            for j in range(num_agents):
+                for i in range(num_agents):
+                    if A[j, i] == 1:
+                        print(f"  Agent {i} -> Agent {j}: effect={effect_sizes[j,i]:.6f}, "
+                              f"normalized={normalized_effects[j,i]:.4f} "
+                              f"({normalized_effects[j,i]*100:.2f}% of total impact on agent {j})")
     
-    return A, p_values, test_statistics
+    return A, p_values, test_statistics, effect_sizes, normalized_effects, optimal_lag, fitted_model
 
+def get_gamma_values(num_agents, fitted_model):
+    try:
+        agent_names = [f"Agent_{i}" for i in range(num_agents)]
+        print(f"Agent names: {agent_names}")
+        irf_result = fitted_model.irf(20)
+        impulse_response = irf_result.irfs
+        irf_result.plot()
+        plt.savefig('irf_matrix.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        gamma_values = np.zeros((num_agents, num_agents))
+        print(type(impulse_response))
+        print(np.mean(impulse_response, axis=0))
+    except Exception as e:
+        print(f"Error getting gamma values: {e}")
+        return None
 
 def compute_influence_statistics(A, A_ground_truth=None):
     num_agents = A.shape[0]
@@ -323,23 +493,50 @@ def compute_influence_statistics(A, A_ground_truth=None):
         stats['tn'] = int(tn)
     return stats
 
+"""
+def compute_k_hop_propagation_over_time(A, trajectories, timesteps, gamma, max_hops):
+    T, num_agents = trajectories.shape
+    k_hops_results = {}
+    min_window_size = (5 * num_agents * 2) + 10
+    window_size = (len(T)/timesteps)
+    for t in range(len(timesteps)):
+
+
+"""
+
 def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3, time_windows=None, 
                                           rolling_window_size=None, rolling_step_size=None, 
-                                          num_temporal_windows=None, data=None):
+                                          num_temporal_windows=None, data=None,
+                                          global_effect_sizes=None, global_normalized_effects=None):
+    """
+    Args:
+        A: Global influence matrix
+        trajectories: Time series data
+        timesteps: Corresponding timesteps
+        max_hops: Maximum number of hops
+        global_effect_sizes: Optional effect sizes for global A
+        global_normalized_effects: Optional normalized effects for global A
+    """
     T, num_agents = trajectories.shape
     print(f"Temporal K-Hops Propagation Analysis")
     print(f"Data points: {T}")
     print(f"Timestep range: {timesteps[0] if len(timesteps) > 0 else 'N/A'} to {timesteps[-1] if len(timesteps) > 0 else 'N/A'}")
-    
+
     results = {
         'global_k_hops': None,
         'temporal_windows': {},
         'rolling_analysis': {}
     }
-    global_k_hops = compute_k_hops_propagation(A, max_hops=max_hops)
+    global_k_hops = compute_k_hops_propagation(
+        A, 
+        max_hops=max_hops,
+        effect_sizes=global_effect_sizes,
+        normalized_effects=global_normalized_effects
+    )
     results['global_k_hops'] = global_k_hops
 
     if time_windows is None:
+        # 150 or higher seems like a reasonable time_window
         min_window_size = max((5 * num_agents * 2) + 10, 150)
         if num_temporal_windows is not None:
             target_num_windows = num_temporal_windows
@@ -408,7 +605,7 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
         try:
             adaptive_max_lag = 5
             for test_lag in range(5, 0, -1):
-                required_obs = (test_lag * num_agents * 2) + 10
+                required_obs = (test_lag * num_agents * 10) + 10
                 if len(window_data) >= required_obs:
                     adaptive_max_lag = test_lag
                     break
@@ -416,16 +613,25 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             
             print(f"  Using max_lag: {adaptive_max_lag} (based on {len(window_data)} observations)")
             
-            A_window, _, _ = estimate_influence_granger(
+            A_window, _, _, effect_sizes_window, normalized_effects_window, optimal_lag, fitted_model = estimate_influence_granger(
                 window_data, 
                 max_lag=adaptive_max_lag,
-                alpha=0.1
+                alpha=0.1,
+                quiet=True
             )
-            k_hops_window = compute_k_hops_propagation(A_window, max_hops=max_hops)
+            gamma_values = get_gamma_values(num_agents, fitted_model)
+            k_hops_window = compute_k_hops_propagation(
+                A_window, 
+                max_hops=max_hops,
+                effect_sizes=effect_sizes_window,
+                normalized_effects=normalized_effects_window
+            )
             window_info = {
                 'time_range': (window_start, window_end),
                 'data_indices': (first_idx, last_idx) if first_idx is not None else None,
                 'influence_matrix': A_window,
+                'effect_sizes': effect_sizes_window,
+                'normalized_effects': normalized_effects_window,
                 'k_hops': k_hops_window,
                 'num_data_points': len(window_data),
                 'data_mask': mask
@@ -451,9 +657,17 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             results['temporal_windows'][window_idx] = window_info
             
             print(f"  Direct links: {np.sum(A_window)}")
+            if 'k_hops_effect_sizes' in k_hops_window:
+                direct_effect_sum = np.sum(np.abs(k_hops_window['k_hops_effect_sizes'][1]))
+                print(f"  Total direct effect size: {direct_effect_sum:.6f}")
+            
             for k in range(2, max_hops + 1):
                 indirect = k_hops_window['k_hops_matrices'][k]
-                print(f"  {k}-hop indirect links: {np.sum(indirect)}")
+                num_indirect = np.sum(indirect)
+                print(f"  {k}-hop indirect links: {num_indirect}")
+                if 'k_hops_effect_sizes' in k_hops_window and num_indirect > 0:
+                    indirect_effect_sum = np.sum(np.abs(k_hops_window['k_hops_effect_sizes'][k]))
+                    print(f"    Total {k}-hop effect size: {indirect_effect_sum:.6f}")
         
         except Exception as e:
             print(f"  Error analyzing window: {e}")
@@ -481,7 +695,7 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             window_size = rolling_window_size
     else:
         window_size = max(min_window_size, min(150, T // 2))
-    
+
     if rolling_step_size is not None:
         if rolling_step_size < 1:
             step_size = 1
@@ -516,10 +730,11 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
                     break
             adaptive_max_lag = max(1, adaptive_max_lag)
             
-            A_rolling, _, _ = estimate_influence_granger(
+            A_rolling, _, _, effect_sizes_rolling, normalized_effects_rolling = estimate_influence_granger(
                 window_data,
                 max_lag=adaptive_max_lag,
-                alpha=0.1
+                alpha=0.1,
+                quiet=True
             )
             
             direct_links = np.sum(A_rolling)
@@ -527,6 +742,8 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
                 'time_range': window_times,
                 'data_range': (start_idx, end_idx),
                 'influence_matrix': A_rolling,
+                'effect_sizes': effect_sizes_rolling,
+                'normalized_effects': normalized_effects_rolling,
                 'direct_links': int(direct_links),
                 'max_lag_used': adaptive_max_lag
             })
@@ -548,27 +765,78 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
     
     return results
 
-
-def compute_k_hops_propagation(A, max_hops=3):
+def compute_k_hops_propagation(A, max_hops=3, effect_sizes=None, normalized_effects=None):
+    """
+    Args:
+        A: binary influence matrix
+        max_hops: maximum number of hops to analyze
+        effect_sizes: Optional effect size matrix (effect_sizes[j,i] = magnitude of i->j)
+        normalized_effects: Optional normalized effect matrix
+    
+    Returns:
+        Dictionary with k-hops matrices, paths, and effect sizes
+    """
     num_agents = A.shape[0]
     print(f"K-Hops Propagation Analysis (up to {max_hops} hops)")
     
     k_hops_matrices = {}
     k_hops_paths = {}
+    k_hops_effect_sizes = {}
+    k_hops_normalized_effects = {}
 
     k_hops_matrices[1] = A.copy()
+    if effect_sizes is not None:
+        k_hops_effect_sizes[1] = effect_sizes.copy()
+    if normalized_effects is not None:
+        k_hops_normalized_effects[1] = normalized_effects.copy()
+    
     print(f"  Total direct links: {np.sum(A)}")
+
+    # Create effect size matrix for matrix multiplication (use absolute values for propagation)
+    if effect_sizes is not None:
+        effect_matrix = np.abs(effect_sizes.copy())
+        # Set diagonal to 1 to allow matrix multiplication (self-influence doesn't change effect)
+        np.fill_diagonal(effect_matrix, 1.0)
+    else:
+        effect_matrix = A.astype(float)
 
     for k in range(2, max_hops + 1):
         k_hop_matrix = np.linalg.matrix_power(A.astype(float), k)
         k_hop_binary = (k_hop_matrix > 0).astype(int)
-
         np.fill_diagonal(k_hop_binary, 0)
         k_hops_matrices[k] = k_hop_binary
-        
+
+        # Compute k-hop effect sizes by multiplying effect sizes along paths
+        if effect_sizes is not None:
+            k_hop_effect = np.linalg.matrix_power(effect_matrix, k)
+            # Zero out diagonal and non-existent paths
+            np.fill_diagonal(k_hop_effect, 0.0)
+            k_hop_effect = k_hop_effect * k_hop_binary.astype(float)
+            k_hops_effect_sizes[k] = k_hop_effect
+        else:
+            k_hops_effect_sizes[k] = k_hop_binary.astype(float)
+
         num_k_hops = np.sum(k_hop_binary)
         print(f"\n{k}-hop (Indirect) Influence:")
         print(f"  Total {k}-hop paths: {num_k_hops}")
+        
+        if effect_sizes is not None and num_k_hops > 0:
+            # Find paths with largest effect sizes
+            top_effects = []
+            for j in range(num_agents):
+                for i in range(num_agents):
+                    if k_hop_binary[j, i] == 1 and i != j:
+                        effect_val = k_hop_effect[j, i]
+                        top_effects.append((i, j, effect_val))
+            top_effects.sort(key=lambda x: abs(x[2]), reverse=True)
+            
+            print(f"  Top {k}-hop effect sizes:")
+            for i, j, effect_val in top_effects[:min(5, len(top_effects))]:
+                if normalized_effects is not None and k in k_hops_normalized_effects:
+                    norm_val = k_hops_normalized_effects[k][j, i]
+                    print(f"    Agent {i} → Agent {j}: effect={effect_val:.6f}, normalized={norm_val:.4f}")
+                else:
+                    print(f"    Agent {i} → Agent {j}: effect={effect_val:.6f}")
     
         paths = []
         for j in range(num_agents):
@@ -583,19 +851,75 @@ def compute_k_hops_propagation(A, max_hops=3):
             for i, j, _ in paths[:5]:
                 print(f"    Agent {i} → Agent {j} in {k} hops)")
     
+    # Compute normalized effects for k-hops
+    if normalized_effects is not None:
+        for k in range(2, max_hops + 1):
+            k_hop_normalized = np.zeros_like(k_hops_effect_sizes[k])
+            for j in range(num_agents):
+                # Total k-hop impact on agent j
+                total_k_hop_impact_j = np.sum(k_hops_effect_sizes[k][j, :])
+                if total_k_hop_impact_j > 1e-10:
+                    for i in range(num_agents):
+                        if i != j:
+                            k_hop_normalized[j, i] = k_hops_effect_sizes[k][j, i] / total_k_hop_impact_j
+            k_hops_normalized_effects[k] = k_hop_normalized
+    
     print(f"\n{'='*60}")
     print("Cumulative Influence (all paths up to k hops)")
     print(f"{'='*60}")
     
     cumulative_matrices = {}
+    cumulative_effect_sizes = {}
+    cumulative_normalized_effects = {}
+    
     for k in range(1, max_hops + 1):
         cumulative = np.zeros_like(A)
+        cumulative_effect = np.zeros_like(A, dtype=float)
+        
         for h in range(1, k + 1):
             cumulative = np.logical_or(cumulative, k_hops_matrices[h]).astype(int)
+            if effect_sizes is not None:
+                # Sum effect sizes across all hops up to k
+                cumulative_effect = cumulative_effect + k_hops_effect_sizes[h]
         
         cumulative_matrices[k] = cumulative
+        if effect_sizes is not None:
+            cumulative_effect_sizes[k] = cumulative_effect
+            
+            # Compute cumulative normalized effects
+            cumulative_normalized = np.zeros_like(cumulative_effect)
+            for j in range(num_agents):
+                total_cumulative_impact_j = np.sum(cumulative_effect[j, :])
+                if total_cumulative_impact_j > 1e-10:
+                    for i in range(num_agents):
+                        if i != j:
+                            cumulative_normalized[j, i] = cumulative_effect[j, i] / total_cumulative_impact_j
+            cumulative_normalized_effects[k] = cumulative_normalized
+        
         num_total = np.sum(cumulative)
         print(f"\nUp to {k}-hops: {num_total} total influence relationships")
+        
+        if effect_sizes is not None and k in cumulative_effect_sizes:
+            total_cumulative_effect = np.sum(np.abs(cumulative_effect_sizes[k]))
+            print(f"  Total cumulative effect size: {total_cumulative_effect:.6f}")
+            
+            # Show top cumulative effects
+            top_cumulative = []
+            for j in range(num_agents):
+                for i in range(num_agents):
+                    if cumulative[j, i] == 1 and i != j:
+                        cum_effect = cumulative_effect_sizes[k][j, i]
+                        top_cumulative.append((i, j, cum_effect))
+            top_cumulative.sort(key=lambda x: abs(x[2]), reverse=True)
+            
+            if len(top_cumulative) > 0:
+                print(f"  Top cumulative effects (up to {k}-hops):")
+                for i, j, cum_effect in top_cumulative[:3]:
+                    if cumulative_normalized_effects is not None and k in cumulative_normalized_effects:
+                        norm_cum = cumulative_normalized_effects[k][j, i]
+                        print(f"    Agent {i} → Agent {j}: effect={cum_effect:.6f}, normalized={norm_cum:.4f}")
+                    else:
+                        print(f"    Agent {i} → Agent {j}: effect={cum_effect:.6f}")
 
         if k > 1:
             prev_cumulative = cumulative_matrices[k-1]
@@ -603,13 +927,30 @@ def compute_k_hops_propagation(A, max_hops=3):
             num_new = np.sum(new_relationships)
             if num_new > 0:
                 print(f"  New relationships at {k}-hop level: {num_new}")
+                if effect_sizes is not None:
+                    # Show effect sizes for new relationships
+                    new_effect_sum = 0.0
+                    for j in range(num_agents):
+                        for i in range(num_agents):
+                            if new_relationships[j, i] == 1:
+                                new_effect_sum += abs(cumulative_effect_sizes[k][j, i])
+                    print(f"    Total effect size of new relationships: {new_effect_sum:.6f}")
     
-    return {
+    result = {
         'k_hops_matrices': k_hops_matrices,
         'k_hops_paths': k_hops_paths,
         'cumulative_matrices': cumulative_matrices,
         'max_hops': max_hops
     }
+    
+    if effect_sizes is not None:
+        result['k_hops_effect_sizes'] = k_hops_effect_sizes
+        result['cumulative_effect_sizes'] = cumulative_effect_sizes
+    if normalized_effects is not None:
+        result['k_hops_normalized_effects'] = k_hops_normalized_effects
+        result['cumulative_normalized_effects'] = cumulative_normalized_effects
+    
+    return result
 
 
 def analyze_indirect_spillover(A, k_hops_results):
@@ -662,10 +1003,18 @@ def analyze_indirect_spillover(A, k_hops_results):
             print(f"    Agent {i}: {in_degree_indirect[i]}")
     
     return analysis
-
-
 def compute_temporal_spillover_operator(A_history, gamma_spatial=0.9, 
-                                       gamma_temporal=0.95, K=3):
+                                       gamma_temporal=0.95, K=3,
+                                       k_hops_normalized_effects_history=None):
+    """
+    Args:
+        A_history: List of influence matrices (one per time window)
+        gamma_spatial: Fallback spatial discount factor (used if k_hops_normalized_effects_history not provided)
+        gamma_temporal: Temporal discount factor
+        K: Maximum number of hops
+        k_hops_normalized_effects_history: Optional list of k_hops_normalized_effects dicts (one per window)
+                                          Each dict has keys 1, 2, ..., K with normalized effect matrices
+    """
     if len(A_history) == 0:
         raise ValueError("A_history must contain at least one influence matrix")
     
@@ -676,8 +1025,27 @@ def compute_temporal_spillover_operator(A_history, gamma_spatial=0.9,
         if A_t.shape != (n, n):
             raise ValueError(f"All matrices must have shape ({n}, {n}). Matrix {i} has shape {A_t.shape}")
     
+    # Validate k_hops_normalized_effects_history if provided
+    use_normalized_effects = False
+    if k_hops_normalized_effects_history is not None:
+        if len(k_hops_normalized_effects_history) != T:
+            print(f"Warning: k_hops_normalized_effects_history length ({len(k_hops_normalized_effects_history)}) "
+                  f"doesn't match A_history length ({T}). Using gamma_spatial fallback.")
+        else:
+            use_normalized_effects = True
+            # Verify each window has normalized effects for all k
+            for t, norm_effects_dict in enumerate(k_hops_normalized_effects_history):
+                if not isinstance(norm_effects_dict, dict):
+                    print(f"Warning: Window {t+1} normalized effects is not a dict. Using gamma_spatial fallback.")
+                    use_normalized_effects = False
+                    break
+                for k in range(1, K + 1):
+                    if k not in norm_effects_dict:
+                        print(f"Warning: Window {t+1} missing normalized effects for k={k}. Using gamma_spatial fallback.")
+                        use_normalized_effects = False
+                        break
+    
     S = np.zeros((n, n))
-
     weights = np.array([gamma_temporal ** (T - 1 - t) for t in range(T)])
     weights /= weights.sum() 
     
@@ -685,7 +1053,10 @@ def compute_temporal_spillover_operator(A_history, gamma_spatial=0.9,
     print("Temporal Spillover Operator Computation")
     print(f"{'='*60}")
     print(f"Number of time windows: {T}")
-    print(f"Spatial discount (gamma_spatial): {gamma_spatial}")
+    if use_normalized_effects:
+        print(f"Spatial weighting: Using k_hops_normalized_effects from Granger causality")
+    else:
+        print(f"Spatial discount (gamma_spatial): {gamma_spatial}")
     print(f"Temporal discount (gamma_temporal): {gamma_temporal}")
     print(f"Max hops (K): {K}")
     for t, w in enumerate(weights):
@@ -694,8 +1065,20 @@ def compute_temporal_spillover_operator(A_history, gamma_spatial=0.9,
     for t, A_t in enumerate(A_history):
         A_power = A_t.copy().astype(float)
         for k in range(1, K + 1):
-            weight = weights[t] * (gamma_spatial ** k)
-            S += weight * A_power
+            if use_normalized_effects and k_hops_normalized_effects_history[t] is not None:
+                # Use normalized effects matrix for this k-hop level
+                # normalized_k[j,i] = fraction of agent j's total k-hop impact from agent i
+                # This replaces the uniform gamma_spatial^k discount with actual measured effects
+                normalized_k = k_hops_normalized_effects_history[t][k]
+                # Element-wise multiplication: normalized effects * binary k-hop matrix
+                # Then scale by temporal weight
+                weighted_matrix = weights[t] * normalized_k * A_power
+                S += weighted_matrix
+            else:
+                # Fallback to scalar discount factor (uniform decay with hop distance)
+                weight = weights[t] * (gamma_spatial ** k)
+                S += weight * A_power
+            
             if k < K:
                 A_power = A_power @ A_t.astype(float)
 
@@ -925,7 +1308,7 @@ def test_multiple_window_sizes(trajectories, timesteps, window_sizes=[100, 125, 
                         break
                 adaptive_max_lag = max(1, adaptive_max_lag)
                 
-                A_window, p_values_window, _ = estimate_influence_granger(
+                A_window, p_values_window, _, effect_sizes_window, normalized_effects_window = estimate_influence_granger(
                     window_data,
                     max_lag=adaptive_max_lag,
                     alpha=alpha,
@@ -1273,13 +1656,12 @@ def main():
             if len(trajectories) < args.max_lag + 10:
                 raise ValueError(f"After filtering, only {len(trajectories)} points remain, need at least {args.max_lag + 10}")
 
-    A, p_values, test_statistics = estimate_influence_granger(
+    A, p_values, test_statistics, effect_sizes, normalized_effects, optimal_lag, fitted_model = estimate_influence_granger(
         trajectories, 
         max_lag=args.max_lag, 
         alpha=args.alpha,
         make_stationary_if_needed=not args.no_differencing
     )
-
     A_ground_truth = None
     if args.ground_truth:
         A_ground_truth = np.load(args.ground_truth)
@@ -1311,8 +1693,17 @@ def main():
     indirect_analysis = None
     temporal_k_hops = None
     
+
+    gamma_values = get_gamma_values(len(A), fitted_model)
+    print(gamma_values)
     if args.k_hops > 0:
-        k_hops_results = compute_k_hops_propagation(A, max_hops=args.k_hops)
+        #TODO: K HOP PROPGATION IS simplified using a^k, can alter to recompute at each timestep
+        k_hops_results = compute_k_hops_propagation(
+            A, 
+            max_hops=args.k_hops,
+            effect_sizes=gamma_values,
+            normalized_effects=normalized_effects
+        )
         indirect_analysis = analyze_indirect_spillover(A, k_hops_results)
 
         if args.temporal_analysis:
@@ -1327,7 +1718,9 @@ def main():
                 rolling_window_size=args.rolling_window_size,
                 rolling_step_size=args.rolling_step_size,
                 num_temporal_windows=args.num_temporal_windows,
-                data=data
+                data=data,
+                global_effect_sizes=effect_sizes,
+                global_normalized_effects=normalized_effects
             )
             
             temporal_spillover_operator = None
@@ -1336,14 +1729,22 @@ def main():
                 windows = temporal_k_hops['temporal_windows']
                 if len(windows) > 1:
                     A_history = []
+                    k_hops_normalized_effects_history = []
                     for window_idx in sorted(windows.keys()):
-                        A_history.append(windows[window_idx]['influence_matrix'])
+                        window_info = windows[window_idx]
+                        A_history.append(window_info['influence_matrix'])
+                        # Extract k_hops_normalized_effects if available
+                        if 'k_hops' in window_info and 'k_hops_normalized_effects' in window_info['k_hops']:
+                            k_hops_normalized_effects_history.append(window_info['k_hops']['k_hops_normalized_effects'])
+                        else:
+                            k_hops_normalized_effects_history.append(None)
                     
                     temporal_spillover_operator, temporal_weights = compute_temporal_spillover_operator(
                         A_history,
                         gamma_spatial=args.gamma_spatial,
                         gamma_temporal=args.gamma_temporal,
-                        K=args.k_hops
+                        K=args.k_hops,
+                        k_hops_normalized_effects_history=k_hops_normalized_effects_history if any(k is not None for k in k_hops_normalized_effects_history) else None
                     )
                     
                     temporal_k_hops['temporal_spillover_operator'] = temporal_spillover_operator
