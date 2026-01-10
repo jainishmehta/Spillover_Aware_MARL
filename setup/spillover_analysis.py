@@ -493,17 +493,6 @@ def compute_influence_statistics(A, A_ground_truth=None):
         stats['tn'] = int(tn)
     return stats
 
-"""
-def compute_k_hop_propagation_over_time(A, trajectories, timesteps, gamma, max_hops):
-    T, num_agents = trajectories.shape
-    k_hops_results = {}
-    min_window_size = (5 * num_agents * 2) + 10
-    window_size = (len(T)/timesteps)
-    for t in range(len(timesteps)):
-
-
-"""
-
 def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3, time_windows=None, 
                                           rolling_window_size=None, rolling_step_size=None, 
                                           num_temporal_windows=None, data=None,
@@ -536,28 +525,25 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
     results['global_k_hops'] = global_k_hops
 
     if time_windows is None:
-        # 150 or higher seems like a reasonable time_window
-        min_window_size = max((5 * num_agents * 2) + 10, 150)
+        # 20 or higher seems like a reasonable time_window
+        min_window_size = max((5 * num_agents * 2) + 10, 2)
         if num_temporal_windows is not None:
-            target_num_windows = num_temporal_windows
+            target_num_windows = num_temporal_windows if num_temporal_windows > 0 else 1
         else:
-            max_windows = max(1, int((T - min_window_size) / min_window_size))
-            target_num_windows = min(3, max_windows)
+            max_windows_size = max(2, int((T - min_window_size) / min_window_size))
+            target_num_windows = min(3, max_windows_size)
         
         if len(timesteps) > 0:
+            min_window_size = max((6 * len(timesteps)) + 10, 2)
+            max_windows_size = max(2, int((T - min_window_size) / min_window_size))
             total_time = timesteps[-1] - timesteps[0]
-            if target_num_windows == 0:
-                target_num_windows = 1
             window_size = total_time / target_num_windows
             time_windows = [timesteps[0] + i * window_size for i in range(target_num_windows + 1)]
         else:
-            if target_num_windows == 0:
-                target_num_windows = 1
             window_size = T / target_num_windows
             time_windows = [int(i * window_size) for i in range(target_num_windows + 1)]
         
         print(f"Auto-generated {target_num_windows} time windows (minimum {min_window_size} points per window)")
-    print(f"\n{'='*60}")
     print("Temporal Window Analysis")
     print(f"{'='*60}")
     print(f"Time windows: {time_windows}")
@@ -572,7 +558,6 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
             mask = np.arange(T) >= int(window_start)
             mask = mask & (np.arange(T) < int(window_end))
         window_data = trajectories[mask]
-        min_required = (5 * num_agents * 2) + 10
         if len(window_data) < min_required:
             print(f"\nWindow {window_idx + 1} ({window_start:.0f}-{window_end:.0f}):")
             print(f"  Insufficient data: {len(window_data)} points (minimum: {min_required})")
@@ -601,7 +586,6 @@ def compute_k_hops_propagation_with_time(A, trajectories, timesteps, max_hops=3,
                 print(f"  Timestep range: {window_timesteps[0]:.0f} to {window_timesteps[-1]:.0f}")
         if episode_info:
             print(episode_info)
-
         try:
             adaptive_max_lag = 5
             for test_lag in range(5, 0, -1):
